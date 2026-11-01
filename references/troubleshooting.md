@@ -89,6 +89,28 @@ bctl.ps1 js "1+1"
 | 有结果但 `value: undefined` | 代码是语句块且无 return | 用 `return ...`，或写成裸表达式 |
 | 报 CORS | 用的是页面 `fetch` 而非 `GM_xmlhttpRequest` | 走 `__` 系列或 `GM_xmlhttpRequest` |
 
+### 页面禁止 eval（CSP）
+
+```
+JS ERROR: this page's Content Security Policy blocks eval, so arbitrary JavaScript cannot run here.
+```
+
+userscript 的沙箱是页面的子 frame，会继承页面的 CSP。`script-src` 里没有 `unsafe-eval` 的站点
+（github.com、Google 系、大多数银行和政府站）会直接抛 `EvalError`。
+
+这不是坏掉，是设计好的降级：
+
+```powershell
+bctl.ps1 js --op title
+bctl.ps1 js --op query --args '{"selector":"a","attr":"href"}'
+bctl.ps1 js --op click --args '{"selector":".btn"}'
+```
+
+`--op` 那套是直接 DOM 调用，不经过 eval，任何 CSP 下都能跑。完整词表见
+[`commands.md`](commands.md#js---op-op---args-json)。
+
+判断一个站点能不能跑任意 JS：`bctl.ps1 js "1+1"`，返回 `2` 就没问题。
+
 **服务起不来看这里**：`server.ps1` 用的是 `TcpListener`，不是 `HttpListener`，所以**不需要管理员权限，也不需要 `netsh http add urlacl`**。如果仍然起不来，检查端口占用：
 
 ```powershell

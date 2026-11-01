@@ -167,6 +167,32 @@ bctl.ps1 js "__click('.next'); await __sleep(800); return document.title"
 
 返回值处理：先按「语句块」执行，返回 `undefined` 时再按「表达式」执行一次，所以裸表达式也能拿到值。
 
+### `js --op <op> [--args <json>]`
+固定操作词表，**不经过 eval**，因此在 CSP 严格的页面（github.com、Google 系、多数银行站）上仍然可用。
+
+```powershell
+bctl.ps1 js --op title
+bctl.ps1 js --op count --args '{"selector":"a"}'
+bctl.ps1 js --op query --args '{"selector":"h2","attr":"id"}'
+bctl.ps1 js --op click --args '{"selector":".next-button"}'
+bctl.ps1 js --op fill  --args '{"selector":"#q","value":"hello"}'
+bctl.ps1 js --op cookies
+```
+
+| op | 参数 | 返回 |
+|---|---|---|
+| `title` `url` `text` `links` `cookies` | — | 页面基本信息 |
+| `html` | `selector?` | outerHTML |
+| `query` | `selector` `attr?` `prop?` | 逐个元素的属性或文本 |
+| `count` | `selector` | 匹配数量 |
+| `click` `submit` | `selector` | 执行结果 |
+| `fill` | `selector` `value` | 触发 input/change 事件 |
+| `meta` | `name` | meta content |
+| `storage` | `store?` | localStorage / sessionStorage |
+| `scrollTo` `scrollBy` | `x` `y` | — |
+
+页面禁用 eval 时 `js "<code>"` 会返回一条说明，列出上面这些 op。
+
 ### 协议（自己接客户端时用）
 
 | 方法 | 路径 | 作用 |
