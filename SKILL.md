@@ -101,13 +101,21 @@ bctl.ps1 drag <x1> <y1> <x2> <y2>
 bctl.ps1 scroll <x> <y> <±delta>
 bctl.ps1 type "<文本>" | type --file txt
 bctl.ps1 key CTRL+L
-bctl.ps1 shot [--win <pid>] [--region x,y,w,h] [--file out.png]
+bctl.ps1 shot [--win <pid>] [--region x,y,w,h] [--file out.png] [--jpeg]
+bctl.ps1 at <x> <y> [--pid <pid>]      # 坐标反查元素，点之前先确认落点
+bctl.ps1 pixel <x> <y>                 # 一个像素的颜色，判状态不用截图
 bctl.ps1 nav <pid> <url>
-bctl.ps1 js "<code>" [--timeout 20]
-bctl.ps1 bridge start|status|stop
+bctl.ps1 wait <pid> --title|--url|--text <正则> [--timeout ms]
+bctl.ps1 js "<code>" [--timeout 8]
+bctl.ps1 bridge start|install|status|stop
+bctl.ps1 batch --file plan.txt [--keep-going]   # N 条命令一个进程，17 倍快
 ```
 
 所有命令加 `--json` 输出机器可解析的单行 JSON。
+
+**多步任务优先用 `batch`。** 每条命令都是新进程（冷启动 ~1.2s，其中真正干活 ~150ms），
+把「读→等→找→点→验」写进一个计划文件一次跑完，5 步从 ~6.2s 降到 ~1.8s。
+验证状态翻转用 `pixel` 取样（35ms），不要为了一句「变蓝了吗」去读一张 3MB 的截图。
 
 ## 交付物
 

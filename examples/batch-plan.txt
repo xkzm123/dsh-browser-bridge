@@ -1,0 +1,15 @@
+# 一次进程跑完整条链：bctl.ps1 batch --file examples/batch-plan.txt --json
+#
+# 每行一条 bctl 命令（不含 bctl.ps1 前缀），# 开头是注释。
+# 引号内的空格不切分，所以正则/带空格的参数记得加引号。
+# 把 13008 换成你自己的浏览器 pid（bctl.ps1 windows 能看到）。
+
+title 13008                                   # 先确认前台是哪个页面
+url 13008
+wait 13008 --title "哔哩哔哩" --timeout 4000   # 等页面真的到了，不要盲睡
+uia 13008 --type Edit --limit 4               # 找搜索框
+clickel 13008 "凡人修仙传" --type Edit         # 聚焦（用占位文本当名字）
+type "白丝小姐姐"                              # Unicode 直送，绕开输入法
+key ENTER
+wait 13008 --title "搜索" --timeout 5000
+pixel 220 978                                 # 取样：点之前的颜色

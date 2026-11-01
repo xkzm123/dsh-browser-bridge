@@ -232,8 +232,24 @@ C:\Users\你\.dsh\profiles\web\node_modules\dsh-browser-bridge\scripts\bctl.ps1 
 **三个专门用来减少往返的工具：**
 
 - **`browser_wait_for`** — 等元素/文字出现，出现即返回。替代「点一下 → 截图 → 看看出没出 → 再截图」这种循环。轮询在页面里做，不消耗对话 token。
-- **`browser_batch`** — 一串动作一次调用。「清空输入框 → 输入关键词 → 回车」三步变一次往返。
+- **`browser_batch`** — 一串动作一次调用。两种模式：`commands` 走无障碍层，**在一个 PowerShell 进程里连跑 N 条 bctl 命令**（5 步 ~0.8s，独立调用要 ~6.2s）；`steps` 走油猴桥做页面内操作。
 - **`browser_click_text`** — 按文字点，**点完顺手把元素的新状态（class / aria-pressed）一起带回来**。大多数「点成功了吗」的问题在这一步就答完了，不用再查一次。
+
+### 为什么快：一次进程，N 条命令
+
+`bctl` 的每条命令都是一次 `powershell.exe` 冷启动（实测 ~800ms）+ 现场编译 C#（~265ms），
+真正干活只要 ~150ms。所以 20 条命令 = 24 秒纯开销。
+
+改法有三处，都已落地：
+
+| 改动 | 效果 |
+|---|---|
+| `batch` 把 N 条命令放进同一进程 | 1250ms/条 → **73ms/条**（17×）；5 条命令 6.2s → **1.8s** |
+| C# 编译产物缓存成 DLL（`%LOCALAPPDATA%\dsh-browser-bridge`） | 每次进程少花 ~200ms 编译 |
+| `pixel` / `at` 让「验证」不再需要截图 | 判一个按钮状态：**35ms 一个像素**，而不是 3MB 一张图 |
+
+`js` 也做了两级探活：`/ping` 只证明服务在，`/stats.lastPollUtc` 才证明有页面在领任务。
+油猴脚本没装时立刻报错（~200ms），不再白等满 20 秒超时。
 
 **一次典型任务长这样：**
 
@@ -241,11 +257,12 @@ C:\Users\你\.dsh\profiles\web\node_modules\dsh-browser-bridge\scripts\bctl.ps1 
 1. browser_navigate        打开搜索页
 2. browser_wait_for        等结果列表出现         ← 替代若干次截图
 3. browser_page_query      取标题+链接，按标题挑   ← 纯文本，模型能看到全部候选
-4. browser_batch           点进目标 + 点赞        ← 一次往返
-5. 完成                     点赞状态从第 4 步就带回来了
+4. browser_batch           点进去 + 点赞 + 取色验证 ← 一次往返，一个进程
+5. 完成                     点赞状态从返回值就看得见（pixel 颜色翻转）
 ```
 
 五步、零截图。
+
 
 ---
 
@@ -336,8 +353,10 @@ Windows 上，浏览器关掉最后一个窗口后，**进程通常不会退出*
 | `browser_press_key` | 发送快捷键 | |
 | `browser_scroll` | 滚轮 | |
 | `browser_screenshot` | 截图存成 PNG | |
+| `browser_pixel` | 读一个像素的颜色，判状态不花图像成本 | |
+| `browser_element_at` | 坐标反查元素，点之前先确认落点 | |
 | `browser_wait_for` | 等元素/文字出现 | ✅ |
-| `browser_batch` | 一串动作一次调用 | ✅ |
+| `browser_batch` | 一串动作一次调用（`commands` 走无障碍层，一个进程跑完） | ✅ |
 | `browser_page_query` | 固定词表查询页面 | ✅ |
 | `browser_run_js` | 执行任意 JavaScript | ✅ |
 | `browser_bridge` | 启动/查看/停止本地桥 | ✅ |
@@ -352,6 +371,9 @@ bctl.ps1 browsers                     # 列浏览器窗口（自动排除宿主�
 bctl.ps1 wake                         # 把后台常驻的浏览器显示回来
 bctl.ps1 uia 14664 --type Button      # 列页面按钮
 bctl.ps1 clickel 14664 "登录"          # 按名字点
+bctl.ps1 at 220 978 --pid 14664       # 这个坐标上是哪个元素
+bctl.ps1 pixel 220 978                # 这个坐标什么颜色
+bctl.ps1 batch --file plan.txt        # 一次进程跑完整条链
 bctl.ps1 js --op items --args '{"selector":"a[href]"}'   # 取标题+链接
 ```
 

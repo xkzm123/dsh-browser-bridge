@@ -189,19 +189,61 @@ F1..F12  A..Z  0..9  COMMA  PERIOD  SLASH  BACKSLASH
 bctl.ps1 shot --file out.png                       # 整个虚拟屏幕
 bctl.ps1 shot --win 13008 --file win.png           # 单个窗口
 bctl.ps1 shot --region 0,0,800,600 --file crop.png # 区域
+bctl.ps1 shot --win 13008 --file win.jpg --jpeg --quality 80   # 小文件
 ```
 
-默认保存到当前目录 `shot.png`。
+默认保存到当前目录 `shot.png`。返回 `{file, bytes}`。
+
+4K 整屏 PNG 约 3MB，JPEG 同画面约 150KB（实测 1.1MB → 163KB）。**判状态不需要图**，
+用下面的 `pixel` 就够；只有在要看布局时才截图。
+
+---
+
+## 校验（判状态不用看图）
+
+### `at <x> <y> [--pid <pid>] [--depth N]`
+
+从坐标反查元素（UIA `ElementFromPoint`），返回命中元素及其祖先链，每行带 `inPage`。
+点击前先证明这个坐标落在目标控件上，而不是点完再截图猜。
+
+```powershell
+bctl.ps1 at 220 978 --pid 13008 --json
+# [{"type":"Text","name":"1.3万","rect":"239,974 34x16",...,"inPage":true}, ...]
+```
+
+`inPage=false` 的行是浏览器自己的窗口 chrome（标签栏、地址栏、控制按钮），点它等于操作浏览器。
+
+### `pixel <x> <y>`
+
+读一个物理像素的颜色，返回 `hex` / `rgb` / `r,g,b`。一次约 35ms，比截图便宜两个数量级。
+
+```powershell
+bctl.ps1 pixel 220 978 --json
+# {"x":220,"y":978,"rgb":"0,174,236","hex":"#00aeec","r":0,"g":174,"b":236}
+```
+
+典型用法：点之前取样一次，点之后取样一次，颜色变了就是状态翻转——「点赞成功」的证据
+是一条 `#00aeec`，不是一张 3MB 的图。
+
 
 ---
 
 ## JS 桥
 
-### `bridge start|status|stop [--port 8737]`
+### `bridge start|install|status|stop [--port 8737]`
 起停本地 TCP 服务（`127.0.0.1`，纯 `TcpListener`，**不需要管理员权限**，也不占用 HTTP URL ACL）。
 
-### `js "<code>" [--file x.js] [--timeout 20]`
+`bridge install` 会顺手把 `<port>/install.user.js` 在默认浏览器里打开，装油猴脚本不用手拼 URL。
+
+### `js "<code>" [--file x.js] [--timeout 8]`
 入队 → 等可见标签页取走 → 执行 → 回传。
+
+失败分两种，报错会直说属于哪一种，不用猜：
+
+```text
+no userscript client is polling the bridge (never polled)      ← 脚本没装，200ms 内返回
+the job was claimed by a tab but never returned (1 still pending) ← 领了没回，页面/CSP 的问题
+```
 
 ```powershell
 bctl.ps1 js "document.title"
@@ -276,5 +318,73 @@ bctl.ps1 js --op clickText --args '{"text":"点赞"}'
 打印 `~\.dsh\browser-bridge\audit.log` 最后 n 条（默认 20）。每条动作带
 `before/after` 的窗口 handle 与可见性，用来定位「哪一步之后窗口没了」。
 
-### `wait <ms>`
+### `wait <ms>` / `wait <pid> --title <re> | --url <re> | --text <re> [--timeout ms] [--poll ms]`
+
+不带谓词时是老行为：睡固定毫秒。带谓词就变成条件轮询——命中立刻返回，返回
+`{ok, matched, elapsedMs, tries, seen}`；没命中时 `ok=false` 并给出 `hint`。
+
+```powershell
+bctl.ps1 wait 13008 --title "哔哩哔哩" --timeout 5000 --json
+bctl.ps1 wait 13008 --text "热门" --poll 200 --json
+```
+
+比 `Start-Sleep 3` 好在：页面已经好了就立刻走，通常省一半以上等待，而且「等到了没有」
+是返回值，不是猜。
+
 ### `clip get` / `clip set <文本>`
+
+---
+
+## 流水线 `batch`（一次往返跑完整条链）
+
+```powershell
+bctl.ps1 batch --file plan.txt [--keep-going] [--echo] [--json]
+bctl.ps1 batch --cmd "title 13008" --cmd "pixel 220 978" --json
+bctl.ps1 batch --steps '["title 13008","url 13008"]' --json
+```
+
+每条命令都是一个新的 `powershell.exe`：冷启动 ~800ms + 现场编译 C# ~265ms，
+而真正干活只有 ~150ms。`batch` 把这些命令放进**同一个进程**里连着跑，
+只付一次启动成本。
+
+实测（同一台机器、同一页面）：
+
+| 方式 | 5 条命令耗时 |
+|---|---|
+| 5 次独立调用 | ~6250 ms（1250 ms/条） |
+| `batch --file` | ~1800 ms（进程启动 1200 + 内部 798） |
+
+计划文件一行一条命令，`#` 开头是注释，引号内的空格不切分：
+
+```text
+# 打开 B 站搜索页并点赞
+title 13008
+url 13008
+wait 13008 --title "哔哩哔哩" --timeout 4000
+uia 13008 --type Edit --limit 4
+pixel 220 978
+```
+
+输出是一个聚合结果，每步都带命令、成败、耗时和数据：
+
+```json
+{"ok":true,"count":5,"failed":0,"totalMs":798,"steps":[
+  {"n":1,"cmd":"title 13008","ok":true,"ms":323,"data":{"ok":true,"title":"…"}},
+  {"n":2,"cmd":"url 13008","ok":true,"ms":135,"data":{"ok":true,"url":"…"}}
+]}
+```
+
+默认遇到失败就停；加 `--keep-going` 继续跑完剩下的步骤，失败的那步在结果里带 `error`。
+
+`seq` / `pipeline` 是 `batch` 的别名。
+
+### 什么时候用哪条通道
+
+| 目标 | 走什么 | 为什么 |
+|---|---|---|
+| 多步 UI 操作（读→等→找→点→验） | `batch --file/--cmd` | 一个进程，17 倍快 |
+| 判某个按钮状态变了没 | `pixel` | 35ms，一张图都不用 |
+| 点之前确认坐标落在谁身上 | `at` | 反查元素，不靠猜 |
+| 抓 DOM 数据、改样式、调页面 API | `js` | 真 DOM 在页面里 |
+| 看布局 / 交截图给人看 | `shot --region/--jpeg` | 只在真需要时付图像成本 |
+

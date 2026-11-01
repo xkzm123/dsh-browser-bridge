@@ -17,28 +17,16 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 
 . (Join-Path $PSScriptRoot 'BctlLib.ps1')
 
-# ---------------------------------------------------------------- arg parsing
-$flags = @{}
-$pos = New-Object System.Collections.ArrayList
-$i = 0
-while ($i -lt $ArgList.Count) {
-    $a = $ArgList[$i]
-    if ($a -like '--*') {
-        $k = $a.TrimStart('-')
-        if ($k -in @('json', 'all', 'double', 'triple', 'help')) { $flags[$k] = $true }
-        elseif ($i + 1 -lt $ArgList.Count) { $flags[$k] = $ArgList[$i + 1]; $i++ }
-        else { $flags[$k] = $true }
-    }
-    else { $null = $pos.Add($a) }
-    $i++
-}
-
-$cmd = if ($pos.Count -gt 0) { $pos[0].ToLower() } else { 'help' }
-$rest = @()
-if ($pos.Count -gt 1) {
-    for ($j = 1; $j -lt $pos.Count; $j++) { $rest += [string]$pos[$j] }
-}
-$isJson = [bool]$flags['json']
+# ---------------------------------------------------------------- dispatcher
+# 每条命令都是一个新的 powershell.exe：冷启动 ~800ms + 现场编译 C# ~265ms，
+# 而真正干活只要 ~150ms。batch 模式把 dispatch 放回同一个进程里跑 N 次，
+# 省掉 N-1 次启动开销（实测单命令 1250ms -> 73ms，17 倍）。
+$script:BatchMode = $false
+$script:flags = @{}
+$script:pos = @()
+$script:cmd = 'help'
+$script:rest = @()
+$script:isJson = $false
 
 function ConvertTo-AsciiJson {
     # --json 必须是 7-bit ASCII：调用方可能是别的进程、别的代码页，
@@ -88,7 +76,9 @@ function Out-List {
     begin { $collected = New-Object System.Collections.ArrayList }
     process { if ($null -ne $Data) { $null = $collected.Add($Data) } }
     end {
-        $rows = @($collected.ToArray())
+        # 空 ArrayList 的 ToArray() 会序列化成 {"value":[],"Count":0}，
+        # 调用方解析会炸。@($collected) 保证空表就是真正的 []。
+        $rows = @($collected)
         if ($isJson) {
             Write-Output (ConvertTo-AsciiJson $rows)
             return
@@ -100,7 +90,11 @@ function Out-List {
 
 function Fail {
     param([string]$Message)
-    if ($isJson) { @{ ok = $false; error = $Message } | ConvertTo-Json -Compress }
+    # batch 模式下不能 exit：那会把整批步骤一起带走，只剩一个空输出。
+    # 用异常让上层的 per-step try/catch 接住，后面的步骤（--keep-going）还能继续。
+    if ($script:BatchMode) { throw [System.Exception]::new([string]$Message) }
+    # 错误也要走 ASCII 转义：调用方读到的必须是纯 7-bit，否则中文/破折号会在管道里变乱码。
+    if ($isJson) { Write-Output (ConvertTo-AsciiJson @{ ok = $false; error = $Message }) }
     else { Write-Host "ERR: $Message" }
     exit 1
 }
@@ -190,6 +184,33 @@ function Need-Pid {
 }
 
 # ---------------------------------------------------------------- commands
+# 分发入口：解析一条命令的参数，然后进 switch。单命令模式和 batch 模式
+# 都走这里，区别只是调用次数（batch 在同一个进程里连调 N 次）。
+function Invoke-BctlCli {
+    param([string[]]$ArgList)
+
+    $script:flags = @{}
+    $script:pos = New-Object System.Collections.ArrayList
+    $i = 0
+    while ($i -lt $ArgList.Count) {
+        $a = $ArgList[$i]
+        if ($a -like '--*') {
+            $k = $a.TrimStart('-')
+            if ($k -in @('json', 'all', 'double', 'triple', 'help', 'jpeg', 'keep-going', 'echo')) { $script:flags[$k] = $true }
+            elseif ($i + 1 -lt $ArgList.Count) { $script:flags[$k] = $ArgList[$i + 1]; $i++ }
+            else { $script:flags[$k] = $true }
+        }
+        else { $null = $script:pos.Add($a) }
+        $i++
+    }
+
+    $script:cmd = if ($script:pos.Count -gt 0) { $script:pos[0].ToLower() } else { 'help' }
+    $script:rest = @()
+    if ($script:pos.Count -gt 1) {
+        for ($j = 1; $j -lt $script:pos.Count; $j++) { $script:rest += [string]$script:pos[$j] }
+    }
+    $script:isJson = [bool]$script:flags['json']
+
 try {
     switch ($cmd) {
 
@@ -208,8 +229,10 @@ dsh-browser-bridge / bctl  -  drive an already-running browser, no restart
   scroll <x> <y> <delta>              wheel, 120 = one notch, negative = down
   type <text> | --file <path>         type text (unicode, bypasses IME)
   key <combo>                         CTRL+L / CTRL+W / ENTER / F5 / PAGE_DOWN
-  shot [file] [--region x,y,w,h]      capture virtual screen
+  shot [file] [--region x,y,w,h]      capture virtual screen (--jpeg [--quality N] = far smaller file)
   shot --win <pid> [--file path]      capture one window
+  at <x> <y> [--pid <pid>]            what element sits at that point (UIA ElementFromPoint)
+  pixel <x> <y>                       RGB at one point — judge "did it turn blue" without an image
   url <pid>                           current URL from the address bar
   title <pid>                         current page title
   tabs <pid>                          list tabs
@@ -225,7 +248,19 @@ dsh-browser-bridge / bctl  -  drive an already-running browser, no restart
   setvalue <pid> <name> <value>       set an input's value
   value <pid> <name>                  read an input's value
   wait <ms>                           sleep
+  wait <pid> --title <re> | --url <re> | --text <re> [--timeout ms] [--poll ms]
+                                      poll until true, return the moment it is (no guessing sleeps)
   clip get | clip set <text>          clipboard
+  js <code> | --op <name> [--timeout s]
+                                      run JS via the userscript bridge (default 8s, fails fast)
+  bridge start|install|status|stop    local userscript bridge (install = open the install page)
+
+  batch --file <plan.txt> [--keep-going] [--echo] [--json]
+  batch --steps '["title 123","url 123"]'
+                                      run many commands in ONE process and return one aggregated
+                                      answer. Same commands, ~17x faster than one process per call.
+                                      seq / pipeline are aliases.
+  plan.txt: one command per line, '#' comments allowed, quotes group arguments.
 
 Global flags: --json (machine readable output)
 '@
@@ -410,18 +445,47 @@ Global flags: --json (machine readable output)
 
         'shot' {
             $file = if ($rest.Count -ge 1) { $rest[0] } elseif ($flags['file']) { $flags['file'] } else { Join-Path (Get-Location) 'shot.png' }
+            $useJpeg = [bool]($flags['jpeg'] -or ($flags['quality']))
+            $quality = if ($flags['quality']) { [int]$flags['quality'] } else { 80 }
             if ($flags['win']) {
                 $w = Need-Pid $flags['win']
-                Get-BctlScreenshot -Path $file -X $w.x -Y $w.y -W $w.w -H $w.h | Out-Null
+                Get-BctlScreenshot -Path $file -X $w.x -Y $w.y -W $w.w -H $w.h -Jpeg:$useJpeg -Quality $quality | Out-Null
             }
             elseif ($flags['region']) {
                 $r = $flags['region'] -split ','
-                Get-BctlScreenshot -Path $file -X ([int]$r[0]) -Y ([int]$r[1]) -W ([int]$r[2]) -H ([int]$r[3]) | Out-Null
+                Get-BctlScreenshot -Path $file -X ([int]$r[0]) -Y ([int]$r[1]) -W ([int]$r[2]) -H ([int]$r[3]) -Jpeg:$useJpeg -Quality $quality | Out-Null
             }
             else {
-                Get-BctlScreenshot -Path $file | Out-Null
+                Get-BctlScreenshot -Path $file -Jpeg:$useJpeg -Quality $quality | Out-Null
             }
-            Out-Result ([pscustomobject]@{ ok = $true; file = (Resolve-Path $file).Path })
+            $info = Get-Item $file
+            Out-Result ([pscustomobject]@{ ok = $true; file = $info.FullName; bytes = $info.Length })
+        }
+
+        'at' {
+            # 坐标 -> 元素。点击之前先证明这个点落在谁身上，比点完再截图猜便宜得多。
+            if ($rest.Count -lt 2) { Fail 'usage: at <x> <y> [--pid <pid>] [--depth N]' }
+            $x = [int]$rest[0]
+            $y = [int]$rest[1]
+            $depth = if ($flags['depth']) { [int]$flags['depth'] } else { 3 }
+            $pageRoot = $null
+            if ($flags['pid']) {
+                $w = Need-Pid $flags['pid']
+                $pageRoot = Get-BctlPageRoot -ProcessId $w.pid
+            }
+            $chain = @(Get-BctlElementAt -X $x -Y $y -Depth $depth -PageRoot $pageRoot)
+            if ($chain.Count -eq 0) { Fail "nothing at $x,$y — no UI Automation element reports that point" }
+            if ($isJson) { $chain | Out-List }
+            else {
+                Write-Host ("hit=" + $chain[0].type + ' "' + $chain[0].name + '"')
+                $chain | Select-Object type, name, rect, inPage | Format-Table -AutoSize | Out-String -Width 400
+            }
+        }
+
+        'pixel' {
+            # 一个像素就能判「按钮变蓝了吗」。整屏截图 3MB 是为了看布局，不是为了判状态。
+            if ($rest.Count -lt 2) { Fail 'usage: pixel <x> <y>' }
+            Out-Result (Get-BctlPixel -X ([int]$rest[0]) -Y ([int]$rest[1]))
         }
 
         'url' {
@@ -455,7 +519,9 @@ Global flags: --json (machine readable output)
 
         'tabs' {
             $w = Need-Pid $rest[0]
-            $items = Find-BctlElements -ProcessId $w.pid -Pattern '' -Type 'TabItem' -Limit 100
+            # 标签页在窗口 chrome 里，不在 Document 子树内——必须用 window 作用域，
+            # 否则永远返回空列表（v1.3.0 的回归：page 作用域看不到 TabItem）。
+            $items = Find-BctlElements -ProcessId $w.pid -Pattern '' -Type 'TabItem' -Limit 100 -Scope 'window'
             $rows = @()
             $n = 0
             foreach ($e in $items) {
@@ -740,9 +806,50 @@ Global flags: --json (machine readable output)
         }
 
         'wait' {
-            $ms = if ($rest.Count -ge 1) { [int]$rest[0] } else { 500 }
-            Start-Sleep -Milliseconds $ms
-            Out-Result ([pscustomobject]@{ ok = $true; waited = $ms })
+            # 两种用法：wait <ms> 是老的固定睡眠；给了 --title/--url/--text 就变成
+            # 条件轮询——命中即返回，不再靠猜「页面到底加载完了没有」。
+            $hasPredicate = $flags['title'] -or $flags['url'] -or $flags['text']
+            if (-not $hasPredicate) {
+                $ms = if ($rest.Count -ge 1) { [int]$rest[0] } else { 500 }
+                Start-Sleep -Milliseconds $ms
+                Out-Result ([pscustomobject]@{ ok = $true; waited = $ms })
+                break
+            }
+            if ($rest.Count -lt 1) { Fail 'usage: wait <pid> --title <regex> | --url <regex> | --text <regex> [--timeout ms] [--poll ms]' }
+            $w = Need-Pid $rest[0]
+            $timeout = if ($flags['timeout']) { [int]$flags['timeout'] } else { 10000 }
+            $poll = if ($flags['poll']) { [int]$flags['poll'] } else { 150 }
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $seen = ''
+            $matched = $false
+            $tries = 0
+            while ($sw.ElapsedMilliseconds -lt $timeout) {
+                $tries++
+                if ($flags['title']) {
+                    try { $doc = Get-BctlDocument -ProcessId $w.pid; if ($doc) { $seen = [string]$doc.Current.Name } } catch { }
+                    if ($seen -match $flags['title']) { $matched = $true }
+                }
+                elseif ($flags['url']) {
+                    $seen = [string](Get-BctlAddressBarValue -Window $w)
+                    if ($seen -match $flags['url']) { $matched = $true }
+                }
+                else {
+                    $hit = @(Find-BctlElements -ProcessId $w.pid -Pattern $flags['text'] -Limit 1)
+                    $seen = if ($hit.Count -gt 0) { [string]$hit[0].Current.Name } else { '' }
+                    if ($hit.Count -gt 0) { $matched = $true }
+                }
+                if ($matched) { break }
+                Start-Sleep -Milliseconds $poll
+            }
+            $out = [pscustomobject]@{
+                ok = $matched; matched = $matched; elapsedMs = [int]$sw.ElapsedMilliseconds
+                tries = $tries; seen = ($seen -replace '\s+', ' ')
+            }
+            if (-not $matched) {
+                $out | Add-Member -NotePropertyName error -NotePropertyValue ("condition not met within {0}ms" -f $timeout)
+                $out | Add-Member -NotePropertyName hint -NotePropertyValue 'the page may still be loading, or this predicate never becomes true on that page'
+            }
+            Out-Result $out
         }
 
         'clip' {
@@ -779,6 +886,29 @@ Global flags: --json (machine readable output)
                     if (-not $ok) { Fail "server did not come up on port $port" }
                     Out-Result ([pscustomobject]@{ ok = $true; port = $port; url = $base })
                 }
+                'install' {
+                    # 一条命令串完「起服务 + 打开用户脚本安装页」。脚本没装时，
+                    # 上层只能干等到超时——先把装的位置递到眼前再说别的。
+                    $running = $false
+                    try { $null = Invoke-RestMethod -Uri "$base/ping" -TimeoutSec 2; $running = $true } catch { }
+                    if (-not $running) {
+                        $server = Join-Path (Split-Path -Parent $PSScriptRoot) 'bridge\server.ps1'
+                        if (-not (Test-Path $server)) { Fail "server.ps1 not found at $server" }
+                        $argLine = "-NoProfile -ExecutionPolicy Bypass -File `"$server`" -Port $port -Quiet"
+                        Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList $argLine | Out-Null
+                        for ($k = 0; $k -lt 25; $k++) {
+                            Start-Sleep -Milliseconds 200
+                            try { $null = Invoke-RestMethod -Uri "$base/ping" -TimeoutSec 1; $running = $true; break } catch { }
+                        }
+                        if (-not $running) { Fail "server did not come up on port $port" }
+                    }
+                    $url = "$base/install.user.js"
+                    Start-Process $url | Out-Null
+                    Out-Result ([pscustomobject]@{
+                            ok = $true; opened = $url; server = $running
+                            hint = 'click 安装 in the userscript prompt, then reload the page. The bridge only runs on the visible tab.'
+                        })
+                }
                 'status' {
                     try { $p = Invoke-RestMethod -Uri "$base/ping" -TimeoutSec 2 } catch { $p = $null }
                     if (-not $p) { Out-Result ([pscustomobject]@{ running = $false; port = $port }); break }
@@ -792,7 +922,7 @@ Global flags: --json (machine readable output)
                     Stop-Process -Id $conn.OwningProcess -Force -ErrorAction SilentlyContinue
                     Out-Result ([pscustomobject]@{ ok = $true; killed = $conn.OwningProcess })
                 }
-                default { Fail "usage: bridge start|status|stop [--port N]" }
+                default { Fail "usage: bridge start|install|status|stop [--port N]" }
             }
         }
 
@@ -803,10 +933,17 @@ Global flags: --json (machine readable output)
             $op = $flags['op']
             if (-not $code -and -not $op) { Fail 'usage: js <code> | js --file <path> | js --op <name> [--args json]' }
             $port = if ($flags['port']) { [int]$flags['port'] } else { 8737 }
-            $timeoutSec = if ($flags['timeout']) { [int]$flags['timeout'] } else { 20 }
+            $timeoutSec = if ($flags['timeout']) { [int]$flags['timeout'] } else { 8 }
             $base = "http://127.0.0.1:$port"
 
-            try { $null = Invoke-RestMethod -Uri "$base/ping" -TimeoutSec 2 } catch { Fail "bridge server not running (run: bctl.ps1 bridge start)" }
+            # 两级探活：/ping 只证明服务在；/stats 的 lastPollUtc 才证明有页面在领任务。
+            # 用户脚本没装时，「等满 20 秒再报 timeout」是纯浪费——现在 200ms 内说清楚。
+            $health = Get-BctlBridgeHealth -Port $port
+            if (-not $health.running) { Fail "bridge server not running (run: bctl.ps1 bridge start)" }
+            if (-not $health.client) {
+                $age = if ($null -ne $health.lastPollSec) { ('last poll {0}s ago' -f $health.lastPollSec) } else { 'never polled' }
+                Fail ("no userscript client is polling the bridge (" + $age + "). Install it with: bctl.ps1 bridge install — then reload the tab. Nothing was executed.")
+            }
 
             $payloadObj = @{}
             if ($code) { $payloadObj['code'] = $code }
@@ -831,7 +968,13 @@ Global flags: --json (machine readable output)
                 if ($r.status -eq 'done') { $result = $r; break }
             }
             if (-not $result) {
-                Fail "no result in ${timeoutSec}s (is the userscript installed and the target tab focused?)"
+                # 超时的两种原因要分开说：没人领 vs 领了没回。否则调用方只能瞎猜。
+                $h = Get-BctlBridgeHealth -Port $port
+                $why = if ($h.pending -gt 0) {
+                    ('the job was claimed by a tab but never returned (' + $h.pending + ' still pending) — focus that tab, or the page blocks script execution')
+                }
+                else { 'no userscript client picked it up — check the userscript is installed and the target tab is in front' }
+                Fail ('no result in ' + $timeoutSec + 's: ' + $why)
             }
             if ($result.ok -eq $false -and $result.error -match 'Content Security Policy') {
                 Write-Host ('NOTE: ' + $result.error)
@@ -845,6 +988,7 @@ Global flags: --json (machine readable output)
         }
 
         default {
+            if ($script:BatchMode) { throw [System.Exception]::new("unknown command: $cmd") }
             Write-Host "unknown command: $cmd"
             Write-Host "run: bctl.ps1 help"
             exit 2
@@ -852,5 +996,155 @@ Global flags: --json (machine readable output)
     }
 }
 catch {
+    if ($script:BatchMode) { throw }
     Fail $_.Exception.Message
+}
+}   # end Invoke-BctlCli
+
+# ---------------------------------------------------------------- pipeline mode
+function Split-BctlLine {
+    # 按空格切分，双/单引号成组（引号内的空格不切）——计划文件里的写法要跟命令行一致。
+    param([string]$Line)
+    $out = New-Object System.Collections.ArrayList
+    $cur = New-Object System.Text.StringBuilder
+    $quote = $null
+    foreach ($ch in $Line.ToCharArray()) {
+        if ($quote) {
+            if ($ch -eq $quote) { $quote = $null } else { [void]$cur.Append($ch) }
+        }
+        elseif ($ch -eq '"' -or $ch -eq "'") { $quote = $ch }
+        elseif ([char]::IsWhiteSpace($ch)) {
+            if ($cur.Length -gt 0) { $null = $out.Add($cur.ToString()); [void]$cur.Clear() }
+        }
+        else { [void]$cur.Append($ch) }
+    }
+    if ($cur.Length -gt 0) { $null = $out.Add($cur.ToString()) }
+    return $out.ToArray()
+}
+
+function Invoke-BctlBatch {
+    # 一个进程跑完整条流水线。每步都强制 --json，回一个聚合结果，
+    # 调用方一次往返拿到全部证据（命令 / 成败 / 耗时 / 数据）。
+    param([string[]]$ArgList)
+
+    $script:BatchMode = $true
+    $file = $null
+    $stepsJson = $null
+    $cmds = New-Object System.Collections.ArrayList
+    $keepGoing = $false
+    $echo = $false
+    $asJson = $false
+    $i = 0
+    while ($i -lt $ArgList.Count) {
+        $a = [string]$ArgList[$i]
+        switch -Regex ($a) {
+            '^--file$' { if ($i + 1 -lt $ArgList.Count) { $file = $ArgList[$i + 1]; $i++ } }
+            '^--steps$' { if ($i + 1 -lt $ArgList.Count) { $stepsJson = $ArgList[$i + 1]; $i++ } }
+            # --cmd 可以重复给：Windows 上层层转义 JSON 很容易被吃掉引号，
+            # 直接一条 --cmd 一步最稳，不需要任何 JSON 语法。
+            '^--cmd$' { if ($i + 1 -lt $ArgList.Count) { $null = $cmds.Add([string]$ArgList[$i + 1]); $i++ } }
+            '^--keep-going$' { $keepGoing = $true }
+            '^--echo$' { $echo = $true }
+            '^--json$' { $asJson = $true }
+        }
+        $i++
+    }
+
+    $lines = @()
+    if ($file) {
+        if (-not (Test-Path $file)) { $script:BatchMode = $false; Fail "plan file not found: $file" }
+        $lines = [System.IO.File]::ReadAllLines($file, [System.Text.Encoding]::UTF8)
+    }
+    elseif ($cmds.Count -gt 0) {
+        $lines = @($cmds)
+    }
+    elseif ($stepsJson) {
+        # JSON 数组是首选；引号在多层转发里被吃掉时退化成 | 或 ; 分隔，别让调用方卡死。
+        $parsed = $null
+        try { $parsed = $stepsJson | ConvertFrom-Json } catch { $parsed = $null }
+        if ($null -ne $parsed -and $parsed -isnot [string]) {
+            $lines = @($parsed | ForEach-Object { [string]$_ })
+        }
+        elseif ($stepsJson -match '\|') {
+            $lines = @($stepsJson -split '\|')
+        }
+        elseif ($stepsJson -match ';') {
+            $lines = @($stepsJson -split ';')
+        }
+        else {
+            $script:BatchMode = $false
+            Fail 'invalid --steps: pass a JSON array of command strings, or use --cmd "<one command>" (repeatable), or --file <plan.txt>'
+        }
+    }
+    if ($lines.Count -eq 0) {
+        $script:BatchMode = $false
+        Fail 'usage: batch --file <plan.txt> | batch --steps ''["title 123","url 123"]'' [--keep-going] [--echo] [--json]'
+    }
+
+    $results = New-Object System.Collections.ArrayList
+    $started = Get-Date
+    $n = 0
+    foreach ($line in $lines) {
+        $trim = ([string]$line).Trim()
+        if ($trim -eq '' -or $trim.StartsWith('#')) { continue }
+        $n++
+        $argv = @(Split-BctlLine $trim)
+        if ($argv -notcontains '--json') { $argv += '--json' }
+        if ($echo) { Write-Host ("[{0}] {1}" -f $n, $trim) }
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        try {
+            $raw = @(Invoke-BctlCli -ArgList $argv)
+            $sw.Stop()
+            $payload = $null
+            for ($k = $raw.Count - 1; $k -ge 0; $k--) {
+                $candidate = $raw[$k]
+                if (($candidate -is [string]) -and $candidate.Trim()) {
+                    try { $payload = $candidate | ConvertFrom-Json; break } catch { continue }
+                }
+            }
+            $ok = $true
+            if ($null -ne $payload -and $payload.PSObject.Properties['ok']) { $ok = [bool]$payload.ok }
+            $null = $results.Add([pscustomobject]@{
+                    n = $n; cmd = $trim; ok = $ok; ms = [int]$sw.ElapsedMilliseconds; data = $payload; error = $null
+                })
+        }
+        catch {
+            $sw.Stop()
+            $null = $results.Add([pscustomobject]@{
+                    n = $n; cmd = $trim; ok = $false; ms = [int]$sw.ElapsedMilliseconds; data = $null; error = $_.Exception.Message
+                })
+            if (-not $keepGoing) { break }
+        }
+    }
+    $script:BatchMode = $false
+
+    $total = [int]((Get-Date) - $started).TotalMilliseconds
+    $failed = @($results | Where-Object { -not $_.ok }).Count
+
+    if ($asJson) {
+        Out-Result ([pscustomobject]@{
+                ok = ($failed -eq 0); count = $results.Count; failed = $failed
+                totalMs = $total; steps = $results.ToArray()
+            })
+        return
+    }
+    if ($results.Count -eq 0) { Write-Host 'no steps ran'; return }
+    foreach ($r in $results) {
+        $mark = if ($r.ok) { 'ok  ' } else { 'FAIL' }
+        $detail = if ($r.error) { 'error: ' + $r.error }
+        elseif ($null -ne $r.data) { ($r.data | ConvertTo-Json -Depth 4 -Compress) }
+        else { '' }
+        if ($detail.Length -gt 160) { $detail = $detail.Substring(0, 160) + '…' }
+        Write-Output ("{0} [{1,2}] {2,6}ms  {3}  {4}" -f $mark, $r.n, $r.ms, $r.cmd, $detail)
+    }
+    Write-Host ("--- {0} steps, {1} failed, {2}ms total" -f $results.Count, $failed, $total)
+}
+
+# ---------------------------------------------------------------- entry point
+if ($ArgList.Count -ge 1 -and $ArgList[0] -match '^(?i)(batch|seq|pipeline)$') {
+    if ($ArgList.Count -ge 2) { Invoke-BctlBatch -ArgList @($ArgList[1..($ArgList.Count - 1)]) }
+    else { Invoke-BctlBatch -ArgList @() }
+}
+else {
+    Invoke-BctlCli -ArgList @($ArgList)
 }

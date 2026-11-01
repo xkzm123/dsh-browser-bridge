@@ -2,7 +2,7 @@
 # Pure PowerShell 5.1 + .NET Framework. No external dependency.
 # Dot-source this file, then call the exported functions.
 
-$script:BctlVersion = '1.0.0'
+$script:BctlVersion = '1.4.0'
 $script:UiaDir = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\'
 $ErrorActionPreference = 'Continue'
 
@@ -138,7 +138,51 @@ public static class BctlNative {
     }
 }
 "@
-    Add-Type -TypeDefinition $cs -Language CSharp
+    # 冷启动实测：现场编译这段 C# 要 ~265ms，而每条 bctl 命令都是一个新进程，
+    # 等于每次都重付一次。把编译产物缓存成 DLL，后续进程 Add-Type -Path 直接载入。
+    # 缓存键 = 源码哈希 + PowerShell 版本，源码一改就自动失效。
+    $script:BctlAssembly = $null
+    $cacheDir = Join-Path $env:LOCALAPPDATA 'dsh-browser-bridge'
+    $dll = $null
+    try {
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($cs + '|' + $PSVersionTable.PSVersion.ToString())
+        $key = -join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') })
+        $sha.Dispose()
+        if (-not (Test-Path $cacheDir)) { [void](New-Item -ItemType Directory -Path $cacheDir -Force) }
+        $dll = Join-Path $cacheDir ('bctl-native-' + $key.Substring(0, 16) + '.dll')
+    }
+    catch { $dll = $null }
+
+    $loaded = $false
+    if ($dll -and (Test-Path $dll)) {
+        try { Add-Type -Path $dll; $script:BctlAssembly = $dll; $loaded = $true }
+        catch { try { Remove-Item $dll -Force -ErrorAction SilentlyContinue } catch { } }
+    }
+    if (-not $loaded) {
+        # -OutputAssembly 只负责把程序集写到磁盘，不保证载入当前会话，
+        # 所以编译完必须再 Add-Type -Path 一次，否则 [BctlNative] 依然找不到。
+        try { Add-Type -TypeDefinition $cs -Language CSharp -OutputAssembly $dll | Out-Null }
+        catch { $dll = $null }
+        if ($dll -and (Test-Path $dll)) {
+            try { Add-Type -Path $dll; $script:BctlAssembly = $dll }
+            catch { $script:BctlAssembly = $null }
+        }
+        # 兜底：磁盘缓存不可用（只读盘 / 组策略）就直接在内存里编译，功能不受影响。
+        if (-not ('BctlNative' -as [type])) {
+            Add-Type -TypeDefinition $cs -Language CSharp
+            $script:BctlAssembly = $null
+        }
+    }
+    # 顺手清掉 7 天前的旧版本缓存，避免源码迭代把缓存目录堆满。
+    if ($script:BctlAssembly -and $cacheDir) {
+        try {
+            Get-ChildItem -Path $cacheDir -Filter 'bctl-native-*.dll' -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -ne $script:BctlAssembly -and $_.LastWriteTime -lt (Get-Date).AddDays(-7) } |
+                Remove-Item -Force -ErrorAction SilentlyContinue
+        }
+        catch { }
+    }
 }
 
 [void][BctlNative]::Dpi()
@@ -474,18 +518,104 @@ function Invoke-BctlType {
 }
 
 function Get-BctlScreenshot {
-    param([string]$Path, [int]$X = 0, [int]$Y = 0, [int]$W = 0, [int]$H = 0)
+    param([string]$Path, [int]$X = 0, [int]$Y = 0, [int]$W = 0, [int]$H = 0, [switch]$Jpeg, [int]$Quality = 80)
     Add-Type -AssemblyName System.Drawing
     Add-Type -AssemblyName System.Windows.Forms
     if ($W -le 0 -or $H -le 0) {
         $vs = [System.Windows.Forms.SystemInformation]::VirtualScreen
         $X = $vs.X; $Y = $vs.Y; $W = $vs.Width; $H = $vs.Height
     }
+    # 4K 整屏 PNG 约 3MB，视觉模型读一次要好几百毫秒到数秒。同画面 JPEG 约 1/20。
+    if (-not $Jpeg -and $Path -match '(?i)\.jpe?g$') { $Jpeg = $true }
     $bmp = New-Object System.Drawing.Bitmap $W, $H
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.CopyFromScreen($X, $Y, 0, 0, $bmp.Size)
     $g.Dispose()
-    $bmp.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+    if ($Jpeg) {
+        $q = [Math]::Min([Math]::Max($Quality, 10), 100)
+        $codec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' } | Select-Object -First 1
+        $encParams = New-Object System.Drawing.Imaging.EncoderParameters 1
+        $encParams.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter ([System.Drawing.Imaging.Encoder]::Quality, [int64]$q)
+        $bmp.Save($Path, $codec, $encParams)
+    }
+    else {
+        $bmp.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+    }
     $bmp.Dispose()
     return $Path
+}
+
+function Get-BctlPixel {
+    # 读屏幕上一个点的颜色。比整屏截图便宜两个数量级——
+    # 「按钮变蓝了吗」这类状态翻转只需要 1 个像素，不需要一张 3MB 的图。
+    param([int]$X, [int]$Y)
+    Add-Type -AssemblyName System.Drawing
+    $bmp = New-Object System.Drawing.Bitmap 1, 1
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.CopyFromScreen($X, $Y, 0, 0, (New-Object System.Drawing.Size 1, 1))
+    $c = $bmp.GetPixel(0, 0)
+    $g.Dispose()
+    $bmp.Dispose()
+    return [pscustomobject]@{
+        x   = $X
+        y   = $Y
+        rgb = ('{0},{1},{2}' -f $c.R, $c.G, $c.B)
+        hex = ('#{0:x2}{1:x2}{2:x2}' -f $c.R, $c.G, $c.B)
+        r   = $c.R
+        g   = $c.G
+        b   = $c.B
+    }
+}
+
+function Get-BctlElementAt {
+    # 从坐标反查元素（UIA ElementFromPoint），向上一直给到页面根。
+    # 用途：点击之前先证明这个坐标真的落在目标控件上，而不是点完再截图猜。
+    param([int]$X, [int]$Y, [int]$Depth = 3, $PageRoot = $null)
+    $pt = New-Object System.Windows.Point ([double]$X), ([double]$Y)
+    $el = $script:AE::FromPoint($pt)
+    if (-not $el) { return @() }
+    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+    $chain = New-Object System.Collections.ArrayList
+    $cur = $el
+    $i = 0
+    while ($cur -and $i -le $Depth) {
+        $info = Get-BctlElementInfo -Element $cur
+        $inPage = $null
+        if ($PageRoot) { $inPage = Test-BctlInPageTree -Element $cur -PageRoot $PageRoot }
+        $info | Add-Member -NotePropertyName inPage -NotePropertyValue $inPage -Force
+        $null = $chain.Add($info)
+        try { $cur = $walker.GetParent($cur) } catch { break }
+        $i++
+    }
+    return $chain.ToArray()
+}
+
+function Get-BctlBridgeHealth {
+    # 桥的活性判定分两级：/ping 证明服务在，/stats 的 lastPollUtc 才证明
+    # 「有页面在领任务」。没有客户端时立刻返回，别让调用方白等 20 秒。
+    param([int]$Port = 8737, [int]$StaleSec = 5)
+    $base = "http://127.0.0.1:$Port"
+    $ping = $null
+    try { $ping = Invoke-RestMethod -Uri "$base/ping" -TimeoutSec 2 } catch { }
+    if (-not $ping) { return [pscustomobject]@{ running = $false; client = $false; port = $Port } }
+    $stats = $null
+    try { $stats = Invoke-RestMethod -Uri "$base/stats" -TimeoutSec 2 } catch { }
+    $client = $false
+    $age = $null
+    if ($stats -and $stats.lastPollUtc) {
+        try {
+            $last = [datetime]::Parse([string]$stats.lastPollUtc, [System.Globalization.CultureInfo]::InvariantCulture)
+            $age = [math]::Round(((Get-Date) - $last).TotalSeconds, 1)
+            $client = ($age -le $StaleSec)
+        }
+        catch { }
+    }
+    return [pscustomobject]@{
+        running     = $true
+        client      = $client
+        port        = $Port
+        lastPollSec = $age
+        pending     = $ping.pending
+        stats       = $stats
+    }
 }
