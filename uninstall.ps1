@@ -1,4 +1,4 @@
-# uninstall.ps1 - remove dsh-browser-bridge from the DSH skill catalog
+﻿# uninstall.ps1 - remove dsh-browser-bridge from the DSH skill catalog
 param(
     [string]$SkillsDir = (Join-Path $env:USERPROFILE '.dsh\skills')
 )

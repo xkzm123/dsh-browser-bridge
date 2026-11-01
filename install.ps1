@@ -1,4 +1,4 @@
-# install.ps1 - install dsh-browser-bridge as a DSH skill
+﻿# install.ps1 - install dsh-browser-bridge as a DSH skill
 #
 #   powershell -ExecutionPolicy Bypass -File install.ps1
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -SkillsDir "D:\my\skills"

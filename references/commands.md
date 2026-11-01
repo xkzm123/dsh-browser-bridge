@@ -40,7 +40,28 @@ browsers    : {@{pid=13008; process=msedge; uiaVisible=True; title=...; rect=192
 顶层窗口列表。默认过滤掉小于 200x100 的窗口。
 
 ### `browsers`
-只列有主窗口的浏览器进程。
+只列**真正的浏览器窗口**（`Chrome_WidgetWin_1` / `MozillaWindowClass` + 进程白名单），
+宿主自己的 Electron 窗口不会出现。字段：`pid handle process active hidden w h title`。
+
+`hidden: true` 表示进程在、窗口被隐藏（关掉最后一个窗口后的后台常驻状态）。
+
+没有任何窗口时会给出可行动的错误，而不是让上层去重开浏览器：
+
+```
+ERR: msedge is running in the background but has no window.
+     Ask the user to restore it from the taskbar (or run: bctl.ps1 wake).
+     Do not launch a new browser: ...
+```
+
+### `wake`
+把后台常驻、窗口被隐藏的浏览器**重新显示出来**。
+
+```powershell
+bctl.ps1 wake
+```
+
+返回 `pid / process / wasHidden / nowVisible / title`。这是「浏览器不见了」的正确处理方式——
+重开 `msedge.exe` 会多出一个窗口和一个新标签。
 
 ### `active`
 当前前台窗口的 handle / pid / 标题。
@@ -190,6 +211,20 @@ bctl.ps1 js --op cookies
 | `meta` | `name` | meta content |
 | `storage` | `store?` | localStorage / sessionStorage |
 | `scrollTo` `scrollBy` | `x` `y` | — |
+| `waitFor` | `selector` 或 `text`、`timeoutMs` | 等元素/文字出现，出现即返回 |
+| `batch` | `steps: [{op,args}]`、`stopOnError` | 依次执行多步，返回每步结果 |
+| `clickText` | `text`、`selector?`、`exactly?` | 按文字点击，**并回传点击后的 class/aria 状态** |
+
+```powershell
+# 等搜索结果出现（轮询在页面里做，不消耗对话 token）
+bctl.ps1 js --op waitFor --args '{"selector":".video-list","timeoutMs":8000}'
+
+# 多步合成一次调用
+bctl.ps1 js --op batch --args '{"steps":[{"op":"fill","args":{"selector":"#q","value":"白丝"}},{"op":"submit","args":{"selector":"#q"}}]}'
+
+# 按文字点赞，返回值里直接带 after 状态
+bctl.ps1 js --op clickText --args '{"text":"点赞"}'
+```
 
 页面禁用 eval 时 `js "<code>"` 会返回一条说明，列出上面这些 op。
 

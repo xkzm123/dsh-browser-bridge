@@ -1,6 +1,6 @@
 {
   "name": "dsh-browser-bridge",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Operate the Edge or Chrome window that is already open, without restarting it: read the page, click elements by accessible name, type text, scroll, screenshot, and run JavaScript through a userscript bridge. Windows only; drives the live window over UI Automation and SendInput.",
   "license": "MIT",
   "author": "xkzm123",

@@ -1,4 +1,4 @@
-# BctlLib.ps1 - core library for dsh-browser-bridge
+﻿# BctlLib.ps1 - core library for dsh-browser-bridge
 # Pure PowerShell 5.1 + .NET Framework. No external dependency.
 # Dot-source this file, then call the exported functions.
 
@@ -173,10 +173,12 @@ function Get-BctlBinding {
 }
 
 function Get-BctlWindows {
+    param([switch]$IncludeHidden)
     $list = New-Object System.Collections.ArrayList
     $cb = [BctlNative+EnumProc] {
         param($h, $p)
-        if ([BctlNative]::IsWindowVisible($h)) {
+        $vis = [BctlNative]::IsWindowVisible($h)
+        if ($vis -or $IncludeHidden) {
             $sb = New-Object System.Text.StringBuilder 1024
             [void][BctlNative]::GetWindowTextW($h, $sb, 1024)
             $t = $sb.ToString()
@@ -191,6 +193,7 @@ function Get-BctlWindows {
                         handle    = [int64]$h
                         className = $cn.ToString()
                         title     = $t
+                        visible   = $vis
                         x         = $r.Left
                         y         = $r.Top
                         w         = $r.Right - $r.Left
@@ -205,10 +208,21 @@ function Get-BctlWindows {
 }
 
 function Resolve-BctlWindow {
-    param([string]$Spec)
-    $all = Get-BctlWindows
-    if ($Spec -match '^\d+$') { return ($all | Where-Object { $_.pid -eq [uint32]$Spec } | Select-Object -First 1) }
-    return ($all | Where-Object { $_.title -like "*$Spec*" } | Select-Object -First 1)
+    # 同一个进程往往有多个顶层窗口（工具提示、隐藏的辅助窗口、真实窗口框架）。
+    # 必须挑「面积最大的那个窗口」，否则会绑到 146x21 的 helper 上，
+    # 截图/导航/无障碍查询全部落到错误的窗口，上层就会以为浏览器坏了。
+    param([string]$Spec, [switch]$AllowHidden)
+    $all = Get-BctlWindows -IncludeHidden:$AllowHidden
+    if ($Spec -match '^\d+$') {
+        $cands = @($all | Where-Object { $_.pid -eq [uint32]$Spec -and $_.w -ge 300 -and $_.h -ge 200 })
+        if ($cands.Count -eq 0) { $cands = @($all | Where-Object { $_.pid -eq [uint32]$Spec }) }
+        if ($cands.Count -eq 0) { return $null }
+        return ($cands | Sort-Object -Property @{ Expression = { [int64]$_.w * [int64]$_.h }; Descending = $true } | Select-Object -First 1)
+    }
+    $cands = @($all | Where-Object { $_.title -like "*$Spec*" -and $_.w -ge 300 -and $_.h -ge 200 })
+    if ($cands.Count -eq 0) { $cands = @($all | Where-Object { $_.title -like "*$Spec*" }) }
+    if ($cands.Count -eq 0) { return $null }
+    return ($cands | Sort-Object -Property @{ Expression = { [int64]$_.w * [int64]$_.h }; Descending = $true } | Select-Object -First 1)
 }
 
 function Get-BctlUiaRoot {

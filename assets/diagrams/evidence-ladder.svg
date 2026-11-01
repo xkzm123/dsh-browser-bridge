@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="420" viewBox="0 0 1180 420" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif">
+  <defs>
+    <marker id="ar" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#8c959f"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1180" height="420" rx="14" fill="#ffffff"/>
+  <rect x="0.5" y="0.5" width="1179" height="419" rx="14" fill="none" stroke="#d0d7de"/>
+
+  <text x="40" y="50" font-size="20" font-weight="700" fill="#1f2328">三级证据链：够用就停</text>
+  <text x="40" y="76" font-size="14" fill="#57606a">每次判断都从最便宜的一层开始，上一层答不了才升级——截图是最后一招，不是默认动作</text>
+
+  <!-- 第一层 -->
+  <rect x="40" y="104" width="350" height="180" rx="10" fill="#eefbf3" stroke="#94d3a2"/>
+  <circle cx="72" cy="136" r="14" fill="#1a7f37"/>
+  <text x="72" y="141" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">1</text>
+  <text x="96" y="141" font-size="15" font-weight="700" fill="#0b3d1c">读文本</text>
+  <text x="62" y="170" font-size="11.5" fill="#1a7f37" font-family="ui-monospace,Consolas,monospace">browser_page_query</text>
+  <text x="62" y="190" font-size="11.5" fill="#1a7f37" font-family="ui-monospace,Consolas,monospace">browser_get_text</text>
+  <text x="62" y="218" font-size="11.5" fill="#3b5245">状态、属性、标题、列表内容</text>
+  <text x="62" y="236" font-size="11.5" fill="#3b5245">一次调用答多个问题</text>
+  <rect x="62" y="252" width="60" height="8" rx="4" fill="#94d3a2"/>
+  <text x="132" y="260" font-size="11" fill="#1a7f37">成本：最低</text>
+
+  <!-- 第二层 -->
+  <rect x="415" y="104" width="350" height="180" rx="10" fill="#fff8e6" stroke="#e6cc80"/>
+  <circle cx="447" cy="136" r="14" fill="#9a6700"/>
+  <text x="447" y="141" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">2</text>
+  <text x="471" y="141" font-size="15" font-weight="700" fill="#5c3d00">读结构</text>
+  <text x="437" y="170" font-size="11.5" fill="#9a6700" font-family="ui-monospace,Consolas,monospace">browser_snapshot</text>
+  <text x="437" y="196" font-size="11.5" fill="#6b5326">元素类型、可访问名、屏幕坐标</text>
+  <text x="437" y="214" font-size="11.5" fill="#6b5326">不知道「那个按钮叫什么」时用</text>
+  <rect x="437" y="252" width="120" height="8" rx="4" fill="#e6cc80"/>
+  <text x="567" y="260" font-size="11" fill="#9a6700">成本：中等</text>
+
+  <!-- 第三层 -->
+  <rect x="790" y="104" width="350" height="180" rx="10" fill="#fff0f0" stroke="#f0a9a9"/>
+  <circle cx="822" cy="136" r="14" fill="#cf222e"/>
+  <text x="822" y="141" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">3</text>
+  <text x="846" y="141" font-size="15" font-weight="700" fill="#6b1116">看图</text>
+  <text x="812" y="170" font-size="11.5" fill="#cf222e" font-family="ui-monospace,Consolas,monospace">browser_screenshot</text>
+  <text x="812" y="196" font-size="11.5" fill="#7a2b30">布局问题、canvas 内容、</text>
+  <text x="812" y="214" font-size="11.5" fill="#7a2b30">用户明确要求看图</text>
+  <rect x="812" y="252" width="150" height="8" rx="4" fill="#f0a9a9"/>
+  <text x="972" y="260" font-size="11" fill="#cf222e">成本：最高（图片 token）</text>
+
+  <line x1="392" y1="194" x2="411" y2="194" stroke="#8c959f" stroke-width="1.6" marker-end="url(#ar)"/>
+  <line x1="767" y1="194" x2="786" y2="194" stroke="#8c959f" stroke-width="1.6" marker-end="url(#ar)"/>
+
+  <text x="40" y="330" font-size="13" font-weight="600" fill="#1f2328">省掉的不是一次截图，是「截图 → 看不懂 → 换角度再截」这个循环</text>
+  <text x="40" y="356" font-size="12" fill="#57606a">配套的三个工具：wait_for 等结果出现（轮询在页面里，不花对话 token）、</text>
+  <text x="40" y="376" font-size="12" fill="#57606a">batch 把多步合成一次往返、click_text 点完顺手回报状态。</text>
+</svg>

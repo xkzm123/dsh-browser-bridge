@@ -1,4 +1,4 @@
-# bctl.ps1 - command line front-end for dsh-browser-bridge
+﻿# bctl.ps1 - command line front-end for dsh-browser-bridge
 # Drive an ALREADY RUNNING Edge/Chrome/Firefox window without restarting it.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File bctl.ps1 <command> [args]
@@ -183,15 +183,39 @@ Global flags: --json (machine readable output)
         }
 
         'browsers' {
+            # 只列真正的浏览器窗口：主机自己的 Electron / WebView 窗口一律不出现，
+            # 上层工具因此不可能误操作宿主窗口。
+            $fg = [BctlNative]::GetForegroundWindow()
             $rows = @()
-            foreach ($p in (Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match '^(chrome|msedge|brave|vivaldi|opera|chromium|Arc|firefox)$' -and $_.MainWindowHandle -ne 0 })) {
+            $seen = @{}
+            foreach ($w in (Get-BctlWindows -IncludeHidden)) {
+                $p = Get-Process -Id $w.pid -ErrorAction SilentlyContinue
+                if (-not $p) { continue }
+                if ($p.ProcessName -notmatch '^(msedge|chrome|brave|vivaldi|opera|chromium|thorium|firefox|librewolf)$') { continue }
+                if ($w.w -lt 300 -or $w.h -lt 200) { continue }
+                if ($seen.ContainsKey([string]$w.handle)) { continue }
+                $seen[[string]$w.handle] = $true
                 $rows += [pscustomobject]@{
-                    pid     = $p.Id
+                    pid     = $w.pid
+                    handle  = $w.handle
                     process = $p.ProcessName
-                    title   = $p.MainWindowTitle
+                    active  = ([int64]$fg -eq [int64]$w.handle)
+                    hidden  = (-not $w.visible)
+                    w       = $w.w
+                    h       = $w.h
+                    title   = $w.title
                 }
             }
-            if ($rows.Count -eq 0) { Fail 'no browser window found' }
+            if ($rows.Count -eq 0) {
+                # 进程在、窗口没有：这是「关掉窗口但后台常驻」的状态。
+                # 这时重开浏览器只会多出一个新窗口/新标签，必须阻止。
+                $procs = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match '^(msedge|chrome|brave|vivaldi|opera|chromium|thorium|firefox|librewolf)$' })
+                if ($procs.Count -gt 0) {
+                    $names = ($procs | Select-Object -ExpandProperty ProcessName -Unique) -join ', '
+                    Fail ("$names is running in the background but has no window. Ask the user to restore it from the taskbar (or run: bctl.ps1 wake). Do not launch a new browser: that opens an extra window and a new tab instead of using the session the user already has.")
+                }
+                Fail 'no browser is running. Ask the user to open Edge or Chrome.'
+            }
             $rows | Out-List
         }
 
@@ -199,6 +223,42 @@ Global flags: --json (machine readable output)
             $all = Get-BctlWindows
             if (-not $flags['all']) { $all = $all | Where-Object { $_.w -gt 200 -and $_.h -gt 100 } }
             $all | Sort-Object pid | Select-Object pid, handle, className, x, y, w, h, title | Out-List
+        }
+
+        'wake' {
+            # 把「进程还在、窗口被隐藏」的浏览器重新显示出来，代替「重开浏览器」。
+            # 实测：Edge 关掉最后一个窗口后会留在后台，窗口对象仍在，只是不可见；
+            # 这时重开 msedge.exe 会多出一个窗口 + 一个新标签，正是要避免的行为。
+            $bctlNames = @('msedge', 'chrome', 'brave', 'vivaldi', 'opera', 'chromium', 'thorium', 'firefox', 'librewolf')
+            $bctlClasses = @('Chrome_WidgetWin_1', 'MozillaWindowClass')
+            $cands = @()
+            foreach ($w in (Get-BctlWindows -IncludeHidden)) {
+                if ($w.w -lt 300 -or $w.h -lt 200) { continue }
+                if ($bctlClasses -notcontains $w.className) { continue }
+                $p = Get-Process -Id $w.pid -ErrorAction SilentlyContinue
+                if (-not $p) { continue }
+                if ($bctlNames -notcontains $p.ProcessName.ToLower()) { continue }
+                $cands += $w
+            }
+            if ($cands.Count -eq 0) {
+                $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $bctlNames -contains $_.ProcessName.ToLower() })
+                if ($running.Count -gt 0) {
+                    Fail 'the browser is running but every window is gone, so there is nothing to restore. Ask the user to click the browser icon in the taskbar; do not launch a second copy.'
+                }
+                Fail 'no browser is running. Ask the user to open Edge or Chrome.'
+            }
+            $t = $cands | Sort-Object -Property @{ Expression = { [int64]$_.w * [int64]$_.h }; Descending = $true } | Select-Object -First 1
+            [void][BctlNative]::ShowWindow([IntPtr]$t.handle, 9)
+            [void][BctlNative]::ForceForeground([IntPtr]$t.handle)
+            Start-Sleep -Milliseconds 350
+            Out-Result ([pscustomobject]@{
+                    ok         = $true
+                    pid        = $t.pid
+                    process    = (Get-Process -Id $t.pid -ErrorAction SilentlyContinue).ProcessName
+                    wasHidden  = (-not $t.visible)
+                    nowVisible = [BctlNative]::IsWindowVisible([IntPtr]$t.handle)
+                    title      = $t.title
+                })
         }
 
         'active' {

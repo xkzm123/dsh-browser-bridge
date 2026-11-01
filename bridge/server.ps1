@@ -1,4 +1,4 @@
-# server.ps1 - localhost command bridge for dsh-browser-bridge
+﻿# server.ps1 - localhost command bridge for dsh-browser-bridge
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File server.ps1 -Port 8737
 #
@@ -103,7 +103,8 @@ while ($true) {
     $client = $null
     try {
         $client = $listener.AcceptTcpClient()
-        $client.ReceiveTimeout = 5000
+        $client.ReceiveTimeout = 3000
+        $client.NoDelay = $true
         $stream = $client.GetStream()
         $req = Read-HttpRequest -Stream $stream
         if (-not $req) { $client.Close(); continue }

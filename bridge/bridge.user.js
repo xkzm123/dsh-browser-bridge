@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dsh-browser-bridge
 // @namespace    https://github.com/xkzm123/dsh-browser-bridge
-// @version      1.1.0
+// @version      1.3.0
 // @description  Lets a DeepSeek Harness session read and drive an already-running browser, without restarting it or enabling remote debugging.
 // @author       xkzm123
 // @match        *://*/*
@@ -100,6 +100,73 @@
             return el.textContent;
         }),
         count: (a) => document.querySelectorAll(a.selector).length,
+        items: (a) => {
+            const sel = a.selector || 'a[href]';
+            const limit = a.limit ?? 40;
+            const needle = String(a.text || '').toLowerCase();
+            const out = [];
+            const seen = new Set();
+            for (const el of document.querySelectorAll(sel)) {
+                const t = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+                if (!t) continue;
+                if (needle && !t.toLowerCase().includes(needle)) continue;
+                const href = el.href || el.getAttribute('href') || '';
+                const key = t + '|' + href;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                out.push({ text: t.slice(0, 160), href: String(href).slice(0, 300) });
+                if (out.length >= limit) break;
+            }
+            return out;
+        },
+        attrs: (a) => {
+            const el = pick(a.selector);
+            const r = el.getBoundingClientRect();
+            const attrs = {};
+            for (const name of ['id', 'class', 'href', 'src', 'alt', 'title', 'role', 'aria-label', 'aria-pressed', 'aria-selected', 'aria-checked', 'aria-expanded', 'data-title']) {
+                const v = el.getAttribute(name);
+                if (v !== null && v !== '') attrs[name] = String(v).slice(0, 200);
+            }
+            return {
+                tag: el.tagName.toLowerCase(),
+                text: (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 300),
+                attrs,
+                rect: [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)],
+            };
+        },
+        clickText: async (a) => {
+            const needle = String(a.text || '');
+            if (!needle) throw new Error('clickText needs a text argument');
+            const root = a.selector ? pick(a.selector) : document.body;
+            const lower = needle.toLowerCase();
+            let best = null;
+            for (const el of root.querySelectorAll('a,button,[role="button"],[onclick],li,span,strong,p')) {
+                const t = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+                if (!t) continue;
+                const hit = a.exactly ? t.toLowerCase() === lower : t.toLowerCase().includes(lower);
+                if (!hit) continue;
+                if (!best || t.length < best.len) best = { el, len: t.length, text: t };
+            }
+            if (!best) throw new Error('no element whose visible text contains "' + needle + '"; nothing was clicked');
+            const el = best.el;
+            try { el.scrollIntoView({ block: 'center', behavior: 'instant' }); } catch { el.scrollIntoView(); }
+            const before = el.className;
+            el.click();
+            // 点完顺手读一次自身状态，把「变了没有」直接回传，免掉一次截图或一次往返
+            await new Promise((r) => setTimeout(r, a.settleMs ?? 300));
+            const attrs = {};
+            for (const name of ['class', 'aria-pressed', 'aria-selected', 'aria-checked', 'aria-expanded', 'href', 'data-title']) {
+                const v = el.getAttribute ? el.getAttribute(name) : null;
+                if (v !== null && v !== '') attrs[name] = String(v).slice(0, 200);
+            }
+            return {
+                clicked: best.text.slice(0, 80),
+                tag: el.tagName.toLowerCase(),
+                changed: before !== el.className,
+                after: attrs,
+                pageText: document.body ? document.body.innerText.slice(0, 120).replace(/\s+/g, ' ') : '',
+            };
+        },
         click: (a) => { pick(a.selector).click(); return 'clicked'; },
         fill: (a) => {
             const el = pick(a.selector);
@@ -123,19 +190,70 @@
             return el ? el.getAttribute('content') : null;
         },
         scrollTo: (a) => { window.scrollTo(a.x ?? 0, a.y ?? 0); return 'scrolled'; },
+        waitFor: async (a) => {
+            const timeout = a.timeoutMs ?? 8000;
+            const needle = a.text ? String(a.text).toLowerCase() : null;
+            const sel = a.selector || null;
+            if (!needle && !sel) throw new Error('waitFor needs selector or text');
+            const t0 = performance.now();
+            for (;;) {
+                let hit = null;
+                if (sel) {
+                    const el = document.querySelector(sel);
+                    if (el) hit = { kind: 'selector', el };
+                }
+                if (!hit && needle) {
+                    const body = document.body ? document.body.innerText.toLowerCase() : '';
+                    if (body.includes(needle)) hit = { kind: 'text', el: document.body };
+                }
+                if (hit) {
+                    const r = hit.el.getBoundingClientRect ? hit.el.getBoundingClientRect() : null;
+                    return {
+                        found: true,
+                        by: hit.kind,
+                        ms: Math.round(performance.now() - t0),
+                        text: (hit.el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 200),
+                        rect: r ? [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)] : null,
+                    };
+                }
+                if (performance.now() - t0 > timeout) {
+                    return { found: false, ms: Math.round(performance.now() - t0), url: location.href };
+                }
+                await new Promise((r) => setTimeout(r, a.intervalMs ?? 250));
+            }
+        },
+        batch: async (a) => {
+            const steps = a.steps || [];
+            if (!Array.isArray(steps) || steps.length === 0) throw new Error('batch needs a non-empty steps array');
+            const out = [];
+            for (const step of steps) {
+                const fn = OPS[step.op];
+                if (!fn) { out.push({ op: step.op, ok: false, error: 'unknown op' }); continue; }
+                try {
+                    const value = fn(step.args ?? {});
+                    out.push({ op: step.op, ok: true, value: value instanceof Promise ? await value : value });
+                } catch (e) {
+                    out.push({ op: step.op, ok: false, error: String((e && e.message) || e) });
+                    if (a.stopOnError !== false) break;
+                }
+            }
+            return out;
+        },
         scrollBy: (a) => { window.scrollBy(a.x ?? 0, a.y ?? 0); return 'scrolled'; },
     };
 
-    function runOp(op, args) {
+    async function runOp(op, args) {
         const fn = OPS[op];
         if (!fn) throw new Error(`unknown op "${op}"; available: ${Object.keys(OPS).join(', ')}`);
-        return fn(args ?? {});
+        const value = fn(args ?? {});
+        return value instanceof Promise ? await value : value;
     }
 
     async function runJob(job) {
         const t0 = performance.now();
         if (job.op) {
-            return { value: stringify(runOp(job.op, job.args)), ms: Math.round(performance.now() - t0) };
+            const value = await runOp(job.op, job.args);
+            return { value: stringify(value), ms: Math.round(performance.now() - t0) };
         }
         if (!evalOk) {
             throw new Error(
@@ -197,7 +315,7 @@
 
     window.__DSH_BRIDGE__ = {
         port: PORT,
-        version: '1.1.0',
+        version: '1.3.0',
         eval: evalOk,
         ops: Object.keys(OPS),
         ping: () => get('/ping'),
