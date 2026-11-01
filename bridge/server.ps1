@@ -144,6 +144,17 @@ while ($true) {
                 Send-Response $stream (Write-Json @{ ok = $true; id = $id })
             }
 
+            '^/requeue$' {
+                # 隐藏标签页把任务还回来，交给当前可见的那个执行
+                try { $payload = $req.body | ConvertFrom-Json } catch { Send-Response $stream (Write-Json @{ ok = $false }) '400 Bad Request'; break }
+                $rid = [int]$payload.id
+                if ($script:jobs.ContainsKey($rid) -and -not $script:results.ContainsKey($rid)) {
+                    $script:order.Enqueue($rid) | Out-Null
+                    Send-Response $stream (Write-Json @{ ok = $true; requeued = $rid })
+                }
+                else { Send-Response $stream (Write-Json @{ ok = $true; requeued = 0 }) }
+            }
+
             '^/result$' {
                 if ($req.method -eq 'POST') {
                     try { $payload = $req.body | ConvertFrom-Json } catch { Send-Response $stream (Write-Json @{ ok = $false }) '400 Bad Request'; break }

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dsh-browser-bridge
 // @namespace    https://github.com/xkzm123/dsh-browser-bridge
-// @version      1.3.0
+// @version      1.3.1
 // @description  Lets a DeepSeek Harness session read and drive an already-running browser, without restarting it or enabling remote debugging.
 // @author       xkzm123
 // @match        *://*/*
@@ -283,13 +283,34 @@
         return { value: stringify(fallback), ms: Math.round(performance.now() - t0) };
     }
 
+    /** 等这个标签页变成可见，最多 ms 毫秒；超时返回 false。 */
+    function waitVisible(ms) {
+        if (document.visibilityState === 'visible') return Promise.resolve(true);
+        return new Promise((resolve) => {
+            const t0 = Date.now();
+            const timer = setInterval(() => {
+                if (document.visibilityState === 'visible') { clearInterval(timer); resolve(true); return; }
+                if (Date.now() - t0 > ms) { clearInterval(timer); resolve(false); }
+            }, 120);
+        });
+    }
+
     async function loop() {
         if (busy) { setTimeout(loop, POLL_MS); return; }
         busy = true;
         try {
-            if (document.visibilityState !== 'visible') { busy = false; setTimeout(loop, POLL_MS * 3); return; }
+            // 隐藏的标签页也轮询：否则浏览器不是前台窗口时桥会完全失效。
+            // 拿到任务后先等它变成可见，最多 3 秒；还是不可见就把任务还回队列，
+            // 让当前可见的那个标签页去执行，避免在后台页面上误操作。
             const job = await get('/poll');
             if (job && job.id) {
+                const visible = await waitVisible(3000);
+                if (!visible) {
+                    await post('/requeue', { id: job.id });
+                    busy = false;
+                    setTimeout(loop, POLL_MS * 2);
+                    return;
+                }
                 const payload = {
                     id: job.id,
                     url: location.href,
@@ -310,12 +331,12 @@
             /* server down; keep quiet */
         }
         busy = false;
-        setTimeout(loop, POLL_MS);
+        setTimeout(loop, document.visibilityState === 'visible' ? POLL_MS : POLL_MS * 2);
     }
 
     window.__DSH_BRIDGE__ = {
         port: PORT,
-        version: '1.3.0',
+        version: '1.3.1',
         eval: evalOk,
         ops: Object.keys(OPS),
         ping: () => get('/ping'),
