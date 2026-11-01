@@ -1,0 +1,8 @@
+# runtime artifacts
+*.png
+page.txt
+shot.png
+
+# windows
+Thumbs.db
+desktop.ini
