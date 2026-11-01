@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="470" viewBox="0 0 1180 470" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif">
+  <rect x="0" y="0" width="1180" height="470" rx="14" fill="#ffffff"/>
+  <rect x="0.5" y="0.5" width="1179" height="469" rx="14" fill="none" stroke="#d0d7de"/>
+
+  <text x="40" y="52" font-size="20" font-weight="700" fill="#1f2328">要不要装油猴脚本？</text>
+  <text x="40" y="78" font-size="14" fill="#57606a">不装也能用，只是少了「在页面里执行 JavaScript」这一类能力</text>
+
+  <!-- 左：不装 -->
+  <rect x="40" y="104" width="530" height="320" rx="10" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text x="70" y="142" font-size="16" font-weight="700" fill="#1f2328">什么都不装</text>
+  <text x="70" y="166" font-size="12" fill="#57606a">只装 DSH 插件，14 个工具</text>
+
+  <text x="70" y="206" font-size="12.5" fill="#1a7f37">✓</text>
+  <text x="92" y="206" font-size="12.5" fill="#1f2328">读当前页面全文、标题、网址</text>
+  <text x="70" y="234" font-size="12.5" fill="#1a7f37">✓</text>
+  <text x="92" y="234" font-size="12.5" fill="#1f2328">列出按钮 / 链接 / 输入框，拿到坐标</text>
+  <text x="70" y="262" font-size="12.5" fill="#1a7f37">✓</text>
+  <text x="92" y="262" font-size="12.5" fill="#1f2328">按名字点击、输入中文、快捷键、滚动</text>
+  <text x="70" y="290" font-size="12.5" fill="#1a7f37">✓</text>
+  <text x="92" y="290" font-size="12.5" fill="#1f2328">截图、切标签、打开网址</text>
+
+  <line x1="70" y1="312" x2="540" y2="312" stroke="#d0d7de" stroke-width="1"/>
+  <text x="70" y="342" font-size="12.5" fill="#cf222e">✕</text>
+  <text x="92" y="342" font-size="12.5" fill="#57606a">在页面里跑自定义 JavaScript</text>
+  <text x="70" y="370" font-size="12.5" fill="#cf222e">✕</text>
+  <text x="92" y="370" font-size="12.5" fill="#57606a">读 Cookie / localStorage</text>
+  <text x="70" y="398" font-size="12.5" fill="#cf222e">✕</text>
+  <text x="92" y="398" font-size="12.5" fill="#57606a">绕过页面无节点区域（部分 canvas 内容）</text>
+
+  <!-- 右：装了 -->
+  <rect x="610" y="104" width="530" height="320" rx="10" fill="#fff8f0" stroke="#f0c193"/>
+  <text x="640" y="142" font-size="16" font-weight="700" fill="#7d4e00">再装一个篡改猴脚本</text>
+  <text x="640" y="166" font-size="12" fill="#8a5a00">多花两分钟，16 个工具全开</text>
+
+  <text x="640" y="206" font-size="12.5" fill="#1a7f37">✓</text>
+  <text x="662" y="206" font-size="12.5" fill="#1f2328">上面 14 个照旧全都能用</text>
+  <text x="640" y="234" font-size="12.5" fill="#1a7f37">✓</text>
+  <text x="662" y="234" font-size="12.5" fill="#1f2328">执行任意 JavaScript，拿返回值</text>
+  <text x="640" y="262" font-size="12.5" fill="#1a7f37">✓</text>
+  <text x="662" y="262" font-size="12.5" fill="#1f2328">读 Cookie / localStorage / 页面 API</text>
+  <text x="640" y="290" font-size="12.5" fill="#1a7f37">✓</text>
+  <text x="662" y="290" font-size="12.5" fill="#1f2328">CSP 严格站点走固定词表查询，照样能读</text>
+
+  <line x1="640" y1="312" x2="1110" y2="312" stroke="#f0c193" stroke-width="1"/>
+  <text x="640" y="342" font-size="12" fill="#7d4e00" font-weight="600">代价</text>
+  <text x="662" y="342" font-size="12.5" fill="#57606a">装一次 Tampermonkey 扩展 + 点一下「安装」</text>
+  <text x="640" y="370" font-size="12" fill="#7d4e00" font-weight="600">安全</text>
+  <text x="662" y="370" font-size="12.5" fill="#57606a">脚本只连 127.0.0.1，本机以外没有任何出入口</text>
+  <text x="640" y="398" font-size="12" fill="#7d4e00" font-weight="600">卸载</text>
+  <text x="662" y="398" font-size="12.5" fill="#57606a">篡改猴面板里删掉即可，不影响前 14 个工具</text>
+
+  <text x="40" y="452" font-size="12" fill="#57606a">想省事就跳过；哪天需要抓数据、读登录态、调页面内部接口，再回来装，随时可以补。</text>
+</svg>

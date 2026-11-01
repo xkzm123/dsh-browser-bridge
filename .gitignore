@@ -9,3 +9,4 @@ desktop.ini
 
 # npm pack output
 *.tgz
+!assets/**/*.png

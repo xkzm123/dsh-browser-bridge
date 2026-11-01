@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="560" viewBox="0 0 1180 560" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#6e7781"/>
+    </marker>
+    <marker id="arrowBlue" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#0969da"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#1a7f37"/>
+    </marker>
+    <marker id="arrowOrange" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#bc4c00"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1180" height="560" rx="14" fill="#ffffff"/>
+  <rect x="0.5" y="0.5" width="1179" height="559" rx="14" fill="none" stroke="#d0d7de"/>
+
+  <text x="40" y="52" font-size="20" font-weight="700" fill="#1f2328">它是怎么工作的</text>
+  <text x="40" y="78" font-size="14" fill="#57606a">三条通道并行，全部在本机完成；浏览器不需要重启，不开放调试端口</text>
+
+  <!-- 左：DSH 会话 -->
+  <rect x="40" y="120" width="230" height="330" rx="10" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text x="155" y="158" font-size="15" font-weight="700" fill="#1f2328" text-anchor="middle">DeepSeek Harness</text>
+  <text x="155" y="180" font-size="12" fill="#57606a" text-anchor="middle">会话里的大模型</text>
+  <rect x="62" y="200" width="186" height="46" rx="6" fill="#ffffff" stroke="#d0d7de"/>
+  <text x="155" y="220" font-size="12" fill="#1f2328" text-anchor="middle">16 个 browser_* 工具</text>
+  <text x="155" y="237" font-size="11" fill="#6e7781" text-anchor="middle">list_windows / snapshot / click…</text>
+  <rect x="62" y="258" width="186" height="46" rx="6" fill="#ffffff" stroke="#d0d7de"/>
+  <text x="155" y="278" font-size="12" fill="#1f2328" text-anchor="middle">模型只看到文字</text>
+  <text x="155" y="295" font-size="11" fill="#6e7781" text-anchor="middle">不接触鼠标键盘底层</text>
+  <text x="155" y="342" font-size="11" fill="#57606a" text-anchor="middle">没有插件时</text>
+  <text x="155" y="360" font-size="11" fill="#57606a" text-anchor="middle">也能直接用命令行调</text>
+
+  <!-- 中：bctl -->
+  <rect x="330" y="120" width="250" height="330" rx="10" fill="#eef4ff" stroke="#b6d3fb"/>
+  <text x="455" y="158" font-size="15" font-weight="700" fill="#0a3069" text-anchor="middle">bctl.ps1</text>
+  <text x="455" y="180" font-size="12" fill="#3d5a80" text-anchor="middle">本机 PowerShell 脚本，零依赖</text>
+  <rect x="352" y="200" width="206" height="86" rx="6" fill="#ffffff" stroke="#b6d3fb"/>
+  <text x="455" y="222" font-size="12" fill="#1f2328" text-anchor="middle">收一条命令</text>
+  <text x="455" y="242" font-size="12" fill="#1f2328" text-anchor="middle">选一条通道</text>
+  <text x="455" y="262" font-size="12" fill="#1f2328" text-anchor="middle">把结果写成 JSON</text>
+  <text x="455" y="318" font-size="11" fill="#3d5a80" text-anchor="middle">Win32 P/Invoke + .NET</text>
+  <text x="455" y="336" font-size="11" fill="#3d5a80" text-anchor="middle">不用 Python，不用 Node 依赖</text>
+
+  <!-- 右：浏览器 -->
+  <rect x="910" y="120" width="230" height="330" rx="10" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text x="1025" y="158" font-size="15" font-weight="700" fill="#1f2328" text-anchor="middle">你的浏览器</text>
+  <text x="1025" y="180" font-size="12" fill="#57606a" text-anchor="middle">Edge / Chrome，本来开着的那个</text>
+  <rect x="932" y="200" width="186" height="46" rx="6" fill="#ffffff" stroke="#d0d7de"/>
+  <text x="1025" y="228" font-size="12" fill="#1f2328" text-anchor="middle">登录态、Cookie 全在</text>
+  <rect x="932" y="258" width="186" height="46" rx="6" fill="#ffffff" stroke="#d0d7de"/>
+  <text x="1025" y="286" font-size="12" fill="#1f2328" text-anchor="middle">不需要重启</text>
+  <text x="1025" y="342" font-size="11" fill="#57606a" text-anchor="middle">不新起空白实例</text>
+  <text x="1025" y="360" font-size="11" fill="#57606a" text-anchor="middle">不开放 9222 端口</text>
+
+  <!-- 箭头：DSH -> bctl -->
+  <line x1="272" y1="285" x2="326" y2="285" stroke="#6e7781" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text x="299" y="272" font-size="10" fill="#57606a" text-anchor="middle">命令</text>
+  <line x1="326" y1="305" x2="272" y2="305" stroke="#6e7781" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text x="299" y="322" font-size="10" fill="#57606a" text-anchor="middle">JSON</text>
+
+  <!-- 三条通道 -->
+  <line x1="582" y1="190" x2="906" y2="190" stroke="#0969da" stroke-width="2" marker-end="url(#arrowBlue)"/>
+  <text x="744" y="180" font-size="12" font-weight="600" fill="#0969da" text-anchor="middle">① UI Automation</text>
+  <text x="744" y="206" font-size="10.5" fill="#57606a" text-anchor="middle">读页面文字 / 元素名 / 坐标，按名字点</text>
+
+  <line x1="582" y1="285" x2="906" y2="285" stroke="#1a7f37" stroke-width="2" marker-end="url(#arrowGreen)"/>
+  <text x="744" y="275" font-size="12" font-weight="600" fill="#1a7f37" text-anchor="middle">② SendInput</text>
+  <text x="744" y="301" font-size="10.5" fill="#57606a" text-anchor="middle">真实鼠标点击、滚轮、快捷键、中文输入</text>
+
+  <line x1="582" y1="380" x2="906" y2="380" stroke="#bc4c00" stroke-width="2" marker-end="url(#arrowOrange)"/>
+  <line x1="906" y1="410" x2="582" y2="410" stroke="#bc4c00" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#arrowOrange)"/>
+  <text x="744" y="370" font-size="12" font-weight="600" fill="#bc4c00" text-anchor="middle">③ 篡改猴桥（可选）</text>
+  <text x="744" y="396" font-size="10.5" fill="#57606a" text-anchor="middle">127.0.0.1:8737 上的小服务</text>
+  <text x="744" y="428" font-size="10.5" fill="#57606a" text-anchor="middle">页面里跑 JS：真 DOM、Cookie、fetch</text>
+
+  <text x="40" y="500" font-size="11.5" fill="#57606a">① 不需要任何安装就能用　② 同左　③ 需要装一次篡改猴 + 一个用户脚本，装完多出「执行 JS」的能力</text>
+  <text x="40" y="524" font-size="11.5" fill="#57606a">前两条通道操作的是「窗口」，第三条通道操作的是「页面内部」——三条一起覆盖绝大多数场景。</text>
+</svg>
