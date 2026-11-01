@@ -130,7 +130,7 @@ while ($true) {
                     if ($script:jobs.ContainsKey($id)) { $job = $script:jobs[$id] }
                 }
                 $script:lastPoll = Get-Date
-                if ($job) { Send-Response $stream (Write-Json @{ id = $id; code = $job.code }) }
+                if ($job) { Send-Response $stream (Write-Json @{ id = $id; code = $job.code; op = $job.op; args = $job.args }) }
                 else { Send-Response $stream (Write-Json @{ id = 0 }) }
             }
 
@@ -138,7 +138,7 @@ while ($true) {
                 try { $payload = $req.body | ConvertFrom-Json } catch { Send-Response $stream (Write-Json @{ ok = $false; error = 'bad json' }) '400 Bad Request'; break }
                 $script:seq++
                 $id = $script:seq
-                $script:jobs[$id] = @{ code = $payload.code; created = (Get-Date) }
+                $script:jobs[$id] = @{ code = $payload.code; op = $payload.op; args = $payload.args; created = (Get-Date) }
                 $script:order.Enqueue($id) | Out-Null
                 Send-Response $stream (Write-Json @{ ok = $true; id = $id })
             }

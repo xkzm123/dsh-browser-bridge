@@ -6,3 +6,6 @@ shot.png
 # windows
 Thumbs.db
 desktop.ini
+
+# npm pack output
+*.tgz

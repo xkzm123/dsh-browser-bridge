@@ -1,0 +1,20 @@
+# dsh-browser-bridge — bundle layer for a dsh profile.
+#
+# `dsh plugin --profile <name> add dsh-browser-bridge` registers this package's
+# `dsh.bundle` manifest, so the profile picks up the row below on the next boot
+# without any extra command line.
+#
+# The plugin itself starts nothing: it only registers agent tools that shell out
+# to scripts/bctl.ps1, which drives the browser window that is already open.
+# Start the optional JavaScript bridge with the browser_bridge tool (or
+# `bctl.ps1 bridge start`) when a task needs real DOM access.
+#
+# Windows only. On other platforms the plugin logs a warning and registers no
+# tools instead of failing the boot.
+
+- insert:
+    - id: dsh-browser-bridge
+      name: dsh-browser-bridge
+      config:
+        timeoutMs: 60000
+        bridgePort: 8737

@@ -46,18 +46,42 @@ function Out-Result {
         [Parameter(ValueFromPipeline = $true, Position = 0)]
         $Data
     )
-    process {
-        if ($null -eq $Data) { return }
+    begin { $collected = New-Object System.Collections.ArrayList }
+    process { if ($null -ne $Data) { $null = $collected.Add($Data) } }
+    end {
+        if ($collected.Count -eq 0) { return }
+        $value = if ($collected.Count -eq 1) { $collected[0] } else { $collected.ToArray() }
         if ($isJson) {
-            $Data | ConvertTo-Json -Depth 8 -Compress
+            Write-Output (ConvertTo-Json -InputObject $value -Depth 8 -Compress)
             return
         }
-        if ($Data -is [string]) { Write-Output $Data; return }
-        if ($Data -is [System.Collections.IEnumerable] -and -not ($Data -is [string])) {
-            Write-Output ($Data | Format-Table -AutoSize | Out-String -Width 400)
+        if ($value -is [string]) { Write-Output $value; return }
+        if ($value -is [System.Collections.IEnumerable]) {
+            Write-Output ($value | Format-Table -AutoSize | Out-String -Width 400)
             return
         }
-        Write-Output ($Data | Format-List | Out-String -Width 400)
+        Write-Output ($value | Format-List | Out-String -Width 400)
+    }
+}
+
+# Like Out-Result, but JSON output is always an array of rows so callers can
+# iterate without special-casing the single-row case.
+function Out-List {
+    [CmdletBinding()]
+    param(
+        [Parameter(ValueFromPipeline = $true, Position = 0)]
+        $Data
+    )
+    begin { $collected = New-Object System.Collections.ArrayList }
+    process { if ($null -ne $Data) { $null = $collected.Add($Data) } }
+    end {
+        $rows = @($collected.ToArray())
+        if ($isJson) {
+            Write-Output (ConvertTo-Json -InputObject $rows -Depth 8 -Compress)
+            return
+        }
+        if ($rows.Count -eq 0) { Write-Output '(empty)'; return }
+        Write-Output ($rows | Format-Table -AutoSize | Out-String -Width 400)
     }
 }
 
@@ -168,13 +192,13 @@ Global flags: --json (machine readable output)
                 }
             }
             if ($rows.Count -eq 0) { Fail 'no browser window found' }
-            Out-Result $rows
+            $rows | Out-List
         }
 
         'windows' {
             $all = Get-BctlWindows
             if (-not $flags['all']) { $all = $all | Where-Object { $_.w -gt 200 -and $_.h -gt 100 } }
-            Out-Result ($all | Sort-Object pid | Select-Object pid, handle, className, x, y, w, h, title)
+            $all | Sort-Object pid | Select-Object pid, handle, className, x, y, w, h, title | Out-List
         }
 
         'active' {
@@ -298,7 +322,7 @@ Global flags: --json (machine readable output)
                 catch { }
                 $rows += [pscustomobject]@{ index = $n; selected = $sel; name = $info.name; rect = $info.rect }
             }
-            Out-Result $rows
+            $rows | Out-List
         }
 
         'tab' {
@@ -360,7 +384,7 @@ Global flags: --json (machine readable output)
                     if ($rows.Count -ge $limit) { break }
                 }
             }
-            if ($isJson) { Out-Result $rows }
+            if ($isJson) { $rows | Out-List }
             else {
                 Write-Host ("total=" + $all.Count + " shown=" + $rows.Count)
                 $rows | Select-Object type, name, rect, cx, cy | Format-Table -AutoSize | Out-String -Width 400
@@ -375,7 +399,7 @@ Global flags: --json (machine readable output)
             $rows = @()
             foreach ($e in $els) { $rows += (Get-BctlElementInfo -Element $e) }
             if ($rows.Count -eq 0) { Fail "no element matched: $($rest[1])" }
-            if ($isJson) { Out-Result $rows }
+            if ($isJson) { $rows | Out-List }
             else { $rows | Select-Object type, name, rect, cx, cy | Format-Table -AutoSize | Out-String -Width 400 }
         }
 
@@ -459,15 +483,22 @@ Global flags: --json (machine readable output)
             if (-not $doc) { Fail 'no Document node found (page still loading?)' }
             $tp = $doc.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
             $txt = $tp.DocumentRange.GetText(-1)
+            if ($isJson) {
+                # 只在显式给了 --file 时落盘，避免每次读取都产生文件
+                $saved = $null
+                if ($flags['file']) {
+                    [System.IO.File]::WriteAllText($flags['file'], $txt, (New-Object System.Text.UTF8Encoding($false)))
+                    $saved = (Resolve-Path $flags['file']).Path
+                }
+                Out-Result ([pscustomobject]@{ ok = $true; chars = $txt.Length; file = $saved; text = $txt })
+                break
+            }
             $file = if ($flags['file']) { $flags['file'] } else { Join-Path (Get-Location) 'page.txt' }
             [System.IO.File]::WriteAllText($file, $txt, (New-Object System.Text.UTF8Encoding($false)))
-            if ($isJson) { Out-Result ([pscustomobject]@{ ok = $true; chars = $txt.Length; file = (Resolve-Path $file).Path }) }
-            else {
-                Write-Host ("chars=" + $txt.Length + " -> " + (Resolve-Path $file).Path)
-                $preview = if ($txt.Length -gt 1200) { $txt.Substring(0, 1200) } else { $txt }
-                Write-Host '--- preview ---'
-                Write-Host $preview
-            }
+            Write-Host ("chars=" + $txt.Length + " -> " + (Resolve-Path $file).Path)
+            $preview = if ($txt.Length -gt 1200) { $txt.Substring(0, 1200) } else { $txt }
+            Write-Host '--- preview ---'
+            Write-Host $preview
         }
 
         'wait' {
@@ -531,14 +562,22 @@ Global flags: --json (machine readable output)
             $code = $null
             if ($flags['file']) { $code = [System.IO.File]::ReadAllText($flags['file'], [System.Text.Encoding]::UTF8) }
             elseif ($rest.Count -ge 1) { $code = ($rest -join ' ') }
-            if (-not $code) { Fail 'usage: js <code> | js --file <path>' }
+            $op = $flags['op']
+            if (-not $code -and -not $op) { Fail 'usage: js <code> | js --file <path> | js --op <name> [--args json]' }
             $port = if ($flags['port']) { [int]$flags['port'] } else { 8737 }
             $timeoutSec = if ($flags['timeout']) { [int]$flags['timeout'] } else { 20 }
             $base = "http://127.0.0.1:$port"
 
             try { $null = Invoke-RestMethod -Uri "$base/ping" -TimeoutSec 2 } catch { Fail "bridge server not running (run: bctl.ps1 bridge start)" }
 
-            $payload = @{ code = $code } | ConvertTo-Json -Compress
+            $payloadObj = @{}
+            if ($code) { $payloadObj['code'] = $code }
+            if ($op) { $payloadObj['op'] = $op }
+            if ($flags['args']) {
+                try { $payloadObj['args'] = ($flags['args'] | ConvertFrom-Json) }
+                catch { Fail 'invalid --args json' }
+            }
+            $payload = $payloadObj | ConvertTo-Json -Compress -Depth 6
             $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
             try {
                 $resp = Invoke-RestMethod -Uri "$base/cmd" -Method Post -Body $bytes -ContentType 'application/json; charset=utf-8' -TimeoutSec 5
@@ -555,6 +594,9 @@ Global flags: --json (machine readable output)
             }
             if (-not $result) {
                 Fail "no result in ${timeoutSec}s (is the userscript installed and the target tab focused?)"
+            }
+            if ($result.ok -eq $false -and $result.error -match 'Content Security Policy') {
+                Write-Host ('NOTE: ' + $result.error)
             }
             if ($isJson) { Out-Result $result }
             else {

@@ -8,15 +8,24 @@ description: 操控用户已经打开、正在运行的 Edge/Chrome/Firefox（�
 让任意一个 DeepSeek Harness 会话，直接接管用户**当前已经打开**的浏览器窗口。
 不重启浏览器，不要求开 `--remote-debugging-port`，不装 Playwright，没有 npm 依赖。
 
+## 两种用法
+
+- **插件模式**（推荐）：`dsh plugin --profile web add github:xkzm123/dsh-browser-bridge`，
+  会话里直接多出 16 个 `browser_*` 工具，不需要命令行。
+- **技能模式**（本文件）：`install.ps1` 装到 `~/.dsh/skills/`，用 `scripts/bctl.ps1` 下命令。
+
+两种模式共用同一套 PowerShell 实现，行为一致。下面是命令与纪律。
+
 ## 选择通道（先想清楚再动手）
 
-| 通道 | 命令 | 用在什么场景 |
+| 通道 | 命令 / 工具 | 用在什么场景 |
 |---|---|---|
-| UIA 无障碍树 | `uia` `find` `text` `clickel` `invoke` `setvalue` `value` `tabs` `url` `title` | 首选。元素级、抗分辨率、能按名字点，不靠猜坐标 |
+| UIA 无障碍树 | `uia` `find` `text` `clickel` `invoke` `setvalue` `tabs` `url` `title` | 首选。元素级、抗分辨率、能按名字点，不靠猜坐标 |
 | 键鼠模拟 | `click` `move` `drag` `scroll` `type` `key` | UIA 够不着的地方：canvas、闭包 shadow DOM、拖拽、文件上传框、快捷键 |
-| JS 桥 | `js` | 要真 DOM/真数据：批量抓取、改样式、拦截请求、读 localStorage、调页面 API |
+| JS 桥（eval） | `js "<code>"` | 无 CSP 限制的站点上批量抓取、改样式、读 localStorage |
+| JS 桥（词表） | `js --op <op>` | **CSP 严格站点**（github.com 等）唯一可用的 DOM 通道 |
 
-优先级：**能 UIA 就不点坐标；要数据就走 JS 桥**。
+优先级：**能 UIA 就不点坐标；要数据先看 CSP**。
 
 ## 标准作业流程
 
@@ -36,6 +45,9 @@ description: 操控用户已经打开、正在运行的 Edge/Chrome/Firefox（�
 5. **切前台是必要的。** `click` 打在后台窗口上等于点在别的东西上；`focus` 失败就用 `clickel`（内部会先 focus）。
 6. **JS 桥只对可见标签页生效**（userscript 里用 `visibilityState` 抢活），要指定页面就先 `tab <pid> <n>`。
 7. **凭据不进日志。** `js` 可能读到 Cookie/Token，落盘前先脱敏。
+8. **CSP 严格的页面禁用 `js "<code>"`。** 沙箱继承页面 CSP，`new AsyncFunction` 会抛
+   `EvalError`。github.com、Google 系、多数银行站都这样。此时改用
+   `js --op <op> --args <json>`，那套词表是直接 DOM 调用，不过 eval。
 
 ## 通道三：JS 桥的安装与自检
 
