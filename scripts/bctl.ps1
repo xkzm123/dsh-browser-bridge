@@ -40,6 +40,19 @@ if ($pos.Count -gt 1) {
 }
 $isJson = [bool]$flags['json']
 
+function ConvertTo-AsciiJson {
+    # --json 必须是 7-bit ASCII：调用方可能是别的进程、别的代码页，
+    # 中文直接写进管道会在多字节边界被截断（实测 ConvertFrom-Json 直接报错）。
+    param($Value)
+    $json = ConvertTo-Json -InputObject $Value -Depth 8 -Compress
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($ch in $json.ToCharArray()) {
+        if ([int]$ch -gt 127) { [void]$sb.AppendFormat('\u{0:x4}', [int]$ch) }
+        else { [void]$sb.Append($ch) }
+    }
+    return $sb.ToString()
+}
+
 function Out-Result {
     [CmdletBinding()]
     param(
@@ -52,7 +65,7 @@ function Out-Result {
         if ($collected.Count -eq 0) { return }
         $value = if ($collected.Count -eq 1) { $collected[0] } else { $collected.ToArray() }
         if ($isJson) {
-            Write-Output (ConvertTo-Json -InputObject $value -Depth 8 -Compress)
+            Write-Output (ConvertTo-AsciiJson $value)
             return
         }
         if ($value -is [string]) { Write-Output $value; return }
@@ -77,7 +90,7 @@ function Out-List {
     end {
         $rows = @($collected.ToArray())
         if ($isJson) {
-            Write-Output (ConvertTo-Json -InputObject $rows -Depth 8 -Compress)
+            Write-Output (ConvertTo-AsciiJson $rows)
             return
         }
         if ($rows.Count -eq 0) { Write-Output '(empty)'; return }
@@ -90,6 +103,82 @@ function Fail {
     if ($isJson) { @{ ok = $false; error = $Message } | ConvertTo-Json -Compress }
     else { Write-Host "ERR: $Message" }
     exit 1
+}
+
+function Normalize-BctlUrl {
+    # 只比 origin + path，忽略 query/fragment/末尾斜杠，用来判断「是不是已经开着」。
+    param([string]$Url)
+    if (-not $Url) { return '' }
+    $u = $Url.Trim()
+    # file:// 在地址栏里显示成 C:/... ，两边要比得了
+    if ($u -match '^(?i)file:') {
+        return (($u -replace '^(?i)file:/*', '').ToLower().TrimEnd('/'))
+    }
+    if ($u -match '^[a-zA-Z][a-zA-Z0-9+.\-]*://([^/?#]+)([^?#]*)') {
+        $hostPart = $matches[1].ToLower()
+        return ($hostPart + $matches[2].TrimEnd('/'))
+    }
+    return $u.ToLower().TrimEnd('/')
+}
+
+function Get-BctlAddressBarValue {
+    # 地址栏在窗口 chrome 里，不在页面子树内——这里必须用窗口根。
+    param($Window)
+    $root = Get-BctlUiaRoot -ProcessId $Window.pid
+    if (-not $root) { return $null }
+    $cond = New-Object System.Windows.Automation.PropertyCondition($script:AE::ControlTypeProperty, $script:CT::Edit)
+    $edits = $root.FindAll($script:TS::Descendants, $cond)
+    $target = $null
+    foreach ($e in $edits) { if ($e.Current.Name -match '(?i)address|search|地址|搜索') { $target = $e; break } }
+    if (-not $target) { foreach ($e in $edits) { if ($e.Current.BoundingRectangle.Y -lt 120) { $target = $e; break } } }
+    if (-not $target) { return $null }
+    try { return $target.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value } catch { return $null }
+}
+
+function Invoke-BctlEnsure {
+    param([switch]$Reopen)
+    $names = @('msedge', 'chrome', 'brave', 'vivaldi', 'opera', 'chromium', 'thorium', 'firefox', 'librewolf')
+    $classes = @('Chrome_WidgetWin_1', 'MozillaWindowClass')
+    $procs = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $names -contains $_.ProcessName.ToLower() })
+    if ($procs.Count -eq 0) {
+        return [pscustomobject]@{ state = 'absent'; hint = 'no browser process. Ask the user to open one; this tool never launches a browser.' }
+    }
+    $rows = @()
+    foreach ($w in (Get-BctlWindows -IncludeHidden)) {
+        if ($w.w -lt 300 -or $w.h -lt 200) { continue }
+        if ($classes -notcontains $w.className) { continue }
+        $p = Get-Process -Id $w.pid -ErrorAction SilentlyContinue
+        if (-not $p) { continue }
+        if ($names -notcontains $p.ProcessName.ToLower()) { continue }
+        $rows += $w
+    }
+    if ($rows.Count -eq 0) {
+        $hint = 'the browser process is alive but has no window. Windows cannot conjure one; ask the user to click the taskbar icon, or pass --reopen to start a window in the same profile (adds a window).'
+        if ($Reopen) {
+            $exe = ($procs | Select-Object -First 1).Path
+            try {
+                Start-Process -FilePath $exe | Out-Null
+                Start-Sleep -Milliseconds 2500
+                return [pscustomobject]@{ state = 'reopened'; exe = $exe }
+            }
+            catch { return [pscustomobject]@{ state = 'windowless'; processes = $procs.Count; hint = $hint; error = $_.Exception.Message } }
+        }
+        return [pscustomobject]@{ state = 'windowless'; processes = $procs.Count; hint = $hint }
+    }
+    $sort = @{ Expression = { [int64]$_.w * [int64]$_.h }; Descending = $true }
+    $vis = @($rows | Where-Object { $_.visible })
+    if ($vis.Count -gt 0) {
+        $t = $vis | Sort-Object -Property $sort | Select-Object -First 1
+        return [pscustomobject]@{ state = 'ok'; pid = $t.pid; handle = $t.handle; title = $t.title }
+    }
+    $t = $rows | Sort-Object -Property $sort | Select-Object -First 1
+    [void][BctlNative]::ShowWindow([IntPtr]$t.handle, 9)
+    [void][BctlNative]::ForceForeground([IntPtr]$t.handle)
+    Start-Sleep -Milliseconds 350
+    return [pscustomobject]@{
+        state = 'hidden'; restored = $true; pid = $t.pid; handle = $t.handle
+        nowVisible = [BctlNative]::IsWindowVisible([IntPtr]$t.handle); title = $t.title
+    }
 }
 
 function Need-Pid {
@@ -195,17 +284,22 @@ Global flags: --json (machine readable output)
                 if ($w.w -lt 300 -or $w.h -lt 200) { continue }
                 if ($seen.ContainsKey([string]$w.handle)) { continue }
                 $seen[[string]$w.handle] = $true
+                # 有 owner 的是弹窗/浮层（翻译条、书签弹窗等），不能当成主窗口
+                $owner = [BctlNative]::GetWindow([IntPtr]$w.handle, 4)
                 $rows += [pscustomobject]@{
                     pid     = $w.pid
                     handle  = $w.handle
                     process = $p.ProcessName
                     active  = ([int64]$fg -eq [int64]$w.handle)
                     hidden  = (-not $w.visible)
+                    dialog  = ($owner -ne [IntPtr]::Zero)
                     w       = $w.w
                     h       = $w.h
                     title   = $w.title
                 }
             }
+            # 主窗口排前面：非弹窗优先，其次面积大的优先
+            $rows = @($rows | Sort-Object -Property @{ Expression = { [int]$_.dialog } }, @{ Expression = { [int64]$_.w * [int64]$_.h }; Descending = $true })
             if ($rows.Count -eq 0) {
                 # 进程在、窗口没有：这是「关掉窗口但后台常驻」的状态。
                 # 这时重开浏览器只会多出一个新窗口/新标签，必须阻止。
@@ -225,40 +319,26 @@ Global flags: --json (machine readable output)
             $all | Sort-Object pid | Select-Object pid, handle, className, x, y, w, h, title | Out-List
         }
 
+        'ensure' {
+            $r = Invoke-BctlEnsure -Reopen:([bool]$flags['reopen'])
+            Write-BctlAudit 'ensure' @{ state = $r.state }
+            Out-Result $r
+        }
+
         'wake' {
-            # 把「进程还在、窗口被隐藏」的浏览器重新显示出来，代替「重开浏览器」。
-            # 实测：Edge 关掉最后一个窗口后会留在后台，窗口对象仍在，只是不可见；
-            # 这时重开 msedge.exe 会多出一个窗口 + 一个新标签，正是要避免的行为。
-            $bctlNames = @('msedge', 'chrome', 'brave', 'vivaldi', 'opera', 'chromium', 'thorium', 'firefox', 'librewolf')
-            $bctlClasses = @('Chrome_WidgetWin_1', 'MozillaWindowClass')
-            $cands = @()
-            foreach ($w in (Get-BctlWindows -IncludeHidden)) {
-                if ($w.w -lt 300 -or $w.h -lt 200) { continue }
-                if ($bctlClasses -notcontains $w.className) { continue }
-                $p = Get-Process -Id $w.pid -ErrorAction SilentlyContinue
-                if (-not $p) { continue }
-                if ($bctlNames -notcontains $p.ProcessName.ToLower()) { continue }
-                $cands += $w
-            }
-            if ($cands.Count -eq 0) {
-                $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $bctlNames -contains $_.ProcessName.ToLower() })
-                if ($running.Count -gt 0) {
-                    Fail 'the browser is running but every window is gone, so there is nothing to restore. Ask the user to click the browser icon in the taskbar; do not launch a second copy.'
-                }
-                Fail 'no browser is running. Ask the user to open Edge or Chrome.'
-            }
-            $t = $cands | Sort-Object -Property @{ Expression = { [int64]$_.w * [int64]$_.h }; Descending = $true } | Select-Object -First 1
-            [void][BctlNative]::ShowWindow([IntPtr]$t.handle, 9)
-            [void][BctlNative]::ForceForeground([IntPtr]$t.handle)
-            Start-Sleep -Milliseconds 350
-            Out-Result ([pscustomobject]@{
-                    ok         = $true
-                    pid        = $t.pid
-                    process    = (Get-Process -Id $t.pid -ErrorAction SilentlyContinue).ProcessName
-                    wasHidden  = (-not $t.visible)
-                    nowVisible = [BctlNative]::IsWindowVisible([IntPtr]$t.handle)
-                    title      = $t.title
-                })
+            $r = Invoke-BctlEnsure
+            Out-Result $r
+        }
+
+        'audit' {
+            $sub = if ($rest.Count -ge 1) { $rest[0] } else { 'tail' }
+            if ($sub -ne 'tail') { Fail 'usage: audit tail [n]' }
+            $n = if ($rest.Count -ge 2) { [int]$rest[1] } else { 20 }
+            $file = Join-Path (Join-Path $env:USERPROFILE '.dsh\browser-bridge') 'audit.log'
+            if (-not (Test-Path $file)) { Out-Result @(); break }
+            $lines = @(Get-Content -Path $file -Tail $n -Encoding UTF8)
+            if ($isJson) { $lines | Out-List }
+            else { foreach ($l in $lines) { Write-Output $l } }
         }
 
         'active' {
@@ -316,9 +396,16 @@ Global flags: --json (machine readable output)
         }
 
         'key' {
-            if ($rest.Count -lt 1) { Fail 'usage: key <combo>' }
-            Invoke-BctlKey -Combo ($rest -join '+')
-            Out-Result ([pscustomobject]@{ ok = $true; combo = ($rest -join '+') })
+            if ($rest.Count -lt 1) { Fail 'usage: key <combo> [--allow-close]' }
+            $combo = (($rest -join '+').ToUpper()) -replace '\s', ''
+            $closeCombos = @('CTRL+W', 'CTRL+F4', 'ALT+F4', 'CTRL+SHIFT+W', 'CTRL+Q')
+            if (($closeCombos -contains $combo) -and -not $flags['allow-close']) {
+                Write-BctlAudit 'key-refused' @{ combo = $combo }
+                Fail ("'" + $combo + "' closes a tab or the window, so nothing was sent. Closing the last window leaves the browser running with no UI, which is exactly the vanished-browser state. Pass --allow-close only when ending the window is really the goal.")
+            }
+            Invoke-BctlKey -Combo $combo
+            Write-BctlAudit 'key' @{ combo = $combo }
+            Out-Result ([pscustomobject]@{ ok = $true; combo = $combo })
         }
 
         'shot' {
@@ -410,9 +497,64 @@ Global flags: --json (machine readable output)
         }
 
         'nav' {
-            if ($rest.Count -lt 2) { Fail 'usage: nav <pid> <url>' }
+            if ($rest.Count -lt 2) { Fail 'usage: nav <pid> <url> [--new-tab]' }
             $w = Need-Pid $rest[0]
             $url = $rest[1]
+            $target = Normalize-BctlUrl $url
+
+            # 默认复用：先看当前标签页是不是已经在目标地址，再看其它标签页的标题。
+            # 只有都不是才真正导航——避免「反复打开」。
+            if (-not $flags['new-tab']) {
+                $cur = Get-BctlAddressBarValue -Window $w
+                if ($cur -and (Normalize-BctlUrl $cur) -eq $target) {
+                    Write-BctlAudit 'nav' @{ pid = $w.pid; url = $url; reused = 'current-tab' }
+                    Out-Result ([pscustomobject]@{ ok = $true; reused = $true; reason = 'already-open'; url = $cur })
+                    break
+                }
+
+                $tabs = @()
+                $items = Find-BctlElements -ProcessId $w.pid -Pattern '' -Type 'TabItem' -Limit 100 -Scope 'window'
+                $n = 0
+                foreach ($e in $items) {
+                    $n++
+                    $sel = $false
+                    try { $sel = $e.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Current.IsSelected } catch { }
+                    $tabs += [pscustomobject]@{ index = $n; selected = $sel; name = $e.Current.Name }
+                }
+                $origIndex = ($tabs | Where-Object { $_.selected } | Select-Object -First 1).index
+
+                $label = $null
+                try {
+                    $hostPart = (($url -split '//')[1] -split '/')[0]
+                    $hostPart = $hostPart -replace '^(www|m)\.', ''
+                    $label = ($hostPart -split '\.')[0]
+                }
+                catch { $label = $null }
+
+                $hit = $null
+                if ($label -and $label.Length -ge 2) {
+                    foreach ($t in ($tabs | Where-Object { -not $_.selected })) {
+                        if ($t.name -notmatch [regex]::Escape($label)) { continue }
+                        [void](Set-BctlForeground -Window $w)
+                        Invoke-BctlKey -Combo ("CTRL+" + $t.index)
+                        Start-Sleep -Milliseconds 400
+                        $u2 = Get-BctlAddressBarValue -Window $w
+                        if ($u2 -and (Normalize-BctlUrl $u2) -eq $target) { $hit = $t; break }
+                    }
+                }
+                if ($hit) {
+                    Write-BctlAudit 'nav' @{ pid = $w.pid; url = $url; reused = ("tab " + $hit.index) }
+                    Out-Result ([pscustomobject]@{ ok = $true; reused = $true; reason = 'existing-tab'; tab = $hit.index; title = $hit.name })
+                    break
+                }
+                if ($origIndex) {
+                    [void](Set-BctlForeground -Window $w)
+                    Invoke-BctlKey -Combo ("CTRL+" + $origIndex)
+                    Start-Sleep -Milliseconds 300
+                }
+            }
+
+            $before = Get-BctlWindowState -Handle $w.handle
             [void](Set-BctlForeground -Window $w)
             Invoke-BctlKey -Combo 'CTRL+L'
             Start-Sleep -Milliseconds 150
@@ -421,13 +563,25 @@ Global flags: --json (machine readable output)
             Start-Sleep -Milliseconds 120
             Invoke-BctlKey -Combo 'ENTER'
             Start-Sleep -Milliseconds 1200
-            Out-Result ([pscustomobject]@{ ok = $true; pid = $w.pid; url = $url })
+            $after = Get-BctlWindowState -Handle $w.handle
+            Write-BctlAudit 'nav' @{ pid = $w.pid; url = $url; reused = 'no'; before = $before; after = $after }
+            if (-not $after.visible) {
+                Fail 'the browser window disappeared during navigation. Run: bctl.ps1 ensure'
+            }
+            $title = ''
+            try { $doc = Get-BctlDocument -ProcessId $w.pid; if ($doc) { $title = $doc.Current.Name } } catch { }
+            Out-Result ([pscustomobject]@{ ok = $true; reused = $false; url = $url; title = $title })
         }
 
         'uia' {
             $w = Need-Pid $rest[0]
-            $root = Get-BctlUiaRoot -ProcessId $w.pid
-            if (-not $root) { Fail 'UI Automation cannot see this window' }
+            # 默认只看网页子树：标题栏的最小化/还原/关闭按钮不在里面，
+            # 这样上层连「看到」这些名字的机会都没有。
+            $root = if ($flags['chrome']) { Get-BctlUiaRoot -ProcessId $w.pid } else { Get-BctlPageRoot -ProcessId $w.pid }
+            if (-not $root) {
+                if ($flags['chrome']) { Fail 'UI Automation cannot see this window' }
+                Fail 'the page is not exposed yet (still loading?). Wait a moment and retry; pass --chrome only when you really need window buttons.'
+            }
             $cond = [System.Windows.Automation.Condition]::TrueCondition
             if ($flags['type']) {
                 $ct = $script:CT::($flags['type'])
@@ -455,7 +609,8 @@ Global flags: --json (machine readable output)
             if ($rest.Count -lt 2) { Fail 'usage: find <pid> <regex>' }
             $w = Need-Pid $rest[0]
             $type = if ($flags['type']) { $flags['type'] } else { '' }
-            $els = Find-BctlElements -ProcessId $w.pid -Pattern $rest[1] -Type $type
+            $scope = if ($flags['chrome']) { 'window' } else { 'page' }
+            $els = Find-BctlElements -ProcessId $w.pid -Pattern $rest[1] -Type $type -Scope $scope
             $rows = @()
             foreach ($e in $els) { $rows += (Get-BctlElementInfo -Element $e) }
             if ($rows.Count -eq 0) { Fail "no element matched: $($rest[1])" }
@@ -464,26 +619,47 @@ Global flags: --json (machine readable output)
         }
 
         'clickel' {
-            if ($rest.Count -lt 2) { Fail 'usage: clickel <pid> <name>' }
+            if ($rest.Count -lt 2) { Fail 'usage: clickel <pid> <name> [--chrome] [--force]' }
             $w = Need-Pid $rest[0]
             $type = if ($flags['type']) { $flags['type'] } else { '' }
-            $el = Find-BctlElement -ProcessId $w.pid -Name $rest[1] -Type $type
+            $scope = if ($flags['chrome']) { 'window' } else { 'page' }
+            $pageRoot = Get-BctlPageRoot -ProcessId $w.pid
+
+            $el = Find-BctlElement -ProcessId $w.pid -Name $rest[1] -Type $type -Scope $scope
             if (-not $el) {
-                $cands = Find-BctlElements -ProcessId $w.pid -Pattern ([regex]::Escape($rest[1])) -Type $type
+                $cands = Find-BctlElements -ProcessId $w.pid -Pattern ([regex]::Escape($rest[1])) -Type $type -Scope $scope
                 if ($cands.Count -gt 0) { $el = $cands[0] }
             }
-            if (-not $el) { Fail "element not found: $($rest[1])" }
+            if (-not $el) { Fail "element not found in the page: $($rest[1])" }
+
+            # 最后一道闸：元素必须真的在网页子树里，否则就是在动浏览器自己的窗口按钮
+            if ($scope -eq 'page' -and -not (Test-BctlInPageTree -Element $el -PageRoot $pageRoot)) {
+                Write-BctlAudit 'clickel-refused' @{ pid = $w.pid; name = $rest[1]; reason = 'outside-page-tree' }
+                Fail ("'" + $rest[1] + "' matched a browser window control, not page content, so the click was refused. Nothing was clicked. Browser chrome is never a valid target: closing it ends the session you are working in.")
+            }
+            if ($scope -eq 'window' -and (Test-BctlDangerName -Name $rest[1]) -and -not $flags['force']) {
+                Write-BctlAudit 'clickel-refused' @{ pid = $w.pid; name = $rest[1]; reason = 'danger-window-button' }
+                Fail ("'" + $rest[1] + "' is a window button (close/minimize). Refused. Add --force only if you really mean to end the browser window.")
+            }
+
             $info = Get-BctlElementInfo -Element $el
+            $before = Get-BctlWindowState -Handle $w.handle
             [void](Set-BctlForeground -Window $w)
             Invoke-BctlClick -X $info.cx -Y $info.cy
+            $after = Get-BctlWindowState -Handle $w.handle
+            Write-BctlAudit 'clickel' @{ pid = $w.pid; name = $info.name; x = $info.cx; y = $info.cy; before = $before; after = $after }
+            if (-not $after.visible) {
+                Fail 'the browser window disappeared right after this click. Run: bctl.ps1 ensure'
+            }
             Out-Result ([pscustomobject]@{ ok = $true; clicked = $info.name; type = $info.type; x = $info.cx; y = $info.cy })
         }
 
         'invoke' {
             if ($rest.Count -lt 2) { Fail 'usage: invoke <pid> <name>' }
             $w = Need-Pid $rest[0]
-            $el = Find-BctlElement -ProcessId $w.pid -Name $rest[1]
-            if (-not $el) { Fail "element not found: $($rest[1])" }
+            $scope = if ($flags['chrome']) { 'window' } else { 'page' }
+            $el = Find-BctlElement -ProcessId $w.pid -Name $rest[1] -Scope $scope
+            if (-not $el) { Fail "element not found in the page: $($rest[1])" }
             $done = $false
             try {
                 $pat = $el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
@@ -514,8 +690,9 @@ Global flags: --json (machine readable output)
         'setvalue' {
             if ($rest.Count -lt 3) { Fail 'usage: setvalue <pid> <name> <value>' }
             $w = Need-Pid $rest[0]
-            $el = Find-BctlElement -ProcessId $w.pid -Name $rest[1]
-            if (-not $el) { Fail "element not found: $($rest[1])" }
+            $scope = if ($flags['chrome']) { 'window' } else { 'page' }
+            $el = Find-BctlElement -ProcessId $w.pid -Name $rest[1] -Scope $scope
+            if (-not $el) { Fail "element not found in the page: $($rest[1])" }
             $val = ($rest[2..($rest.Count - 1)] -join ' ')
             try {
                 $vp = $el.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
@@ -528,8 +705,9 @@ Global flags: --json (machine readable output)
         'value' {
             if ($rest.Count -lt 2) { Fail 'usage: value <pid> <name>' }
             $w = Need-Pid $rest[0]
-            $el = Find-BctlElement -ProcessId $w.pid -Name $rest[1]
-            if (-not $el) { Fail "element not found: $($rest[1])" }
+            $scope = if ($flags['chrome']) { 'window' } else { 'page' }
+            $el = Find-BctlElement -ProcessId $w.pid -Name $rest[1] -Scope $scope
+            if (-not $el) { Fail "element not found in the page: $($rest[1])" }
             try {
                 $vp = $el.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
                 Out-Result ([pscustomobject]@{ ok = $true; name = $rest[1]; value = $vp.Current.Value })

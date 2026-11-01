@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/xkzm123/dsh-browser-bridge/releases"><img alt="version" src="https://img.shields.io/badge/version-1.2.0-2f81f7"></a>
+  <a href="https://github.com/xkzm123/dsh-browser-bridge/releases"><img alt="version" src="https://img.shields.io/badge/version-1.3.0-2f81f7"></a>
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-2ea043"></a>
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-8957e5">
   <img alt="tools" src="https://img.shields.io/badge/tools-20-d29922">
@@ -69,7 +69,7 @@ dsh plugin --profile web add github:xkzm123/dsh-browser-bridge
 装完会显示类似这样：
 
 ```
-+ dsh-browser-bridge 1.2.0
++ dsh-browser-bridge 1.3.0
 Done in 5.1s
 ```
 
@@ -249,6 +249,28 @@ C:\Users\你\.dsh\profiles\web\node_modules\dsh-browser-bridge\scripts\bctl.ps1 
 
 ---
 
+## 它不会做什么
+
+这三条是硬约束，写在代码里而不是文档里：
+
+| 不做 | 原因 |
+|---|---|
+| **不会关闭你的浏览器或标签页** | `CTRL+W`、`CTRL+F4`、`ALT+F4` 直接拒绝执行（要关得显式加 `allowClose`）。关掉最后一扇窗会让浏览器变成「进程在、窗口没、任务栏没图标、声音还在放」的状态——看起来就是浏览器消失了 |
+| **不会点浏览器自己的按钮** | 所有点击只搜网页内容（无障碍树的 `Document` 子树）。标题栏的「最小化/还原/关闭」不在搜索范围里，甚至在快照里都不会出现 |
+| **不会启动浏览器** | 找不到窗口就报错让你去开；它从不执行 `msedge.exe` / `chrome.exe`。重开一个只会多一个窗口和一个新标签 |
+
+浏览器真的没了的时候，`bctl.ps1 ensure` 会告诉你是哪种状态：
+
+```powershell
+bctl.ps1 ensure
+# state : absent        ← 进程都没有，需要你自己开
+# state : windowless    ← 进程在、窗口没了，点任务栏图标恢复
+# state : hidden        ← 窗口被隐藏，已自动恢复
+# state : ok            ← 正常
+```
+
+每一步动作都记在 `~\.dshrowser-bridgeudit.log`，出问题用 `bctl.ps1 audit tail 20` 就能看到是哪一步之后窗口没的。
+
 ## 它是怎么做到的
 
 <p align="center">
@@ -304,8 +326,8 @@ Windows 上，浏览器关掉最后一个窗口后，**进程通常不会退出*
 | `browser_tabs` | 列出标签页 | |
 | `browser_switch_tab` | 切换标签页 | |
 | `browser_page_info` | 当前页标题和网址 | |
-| `browser_navigate` | 打开网址 | |
-| `browser_snapshot` | 导出元素清单（类型、名字、坐标） | |
+| `browser_navigate` | 打开网址；已打开过就直接复用，不重复加载 | |
+| `browser_snapshot` | 导出**网页内容**的元素清单（类型、名字、坐标） | |
 | `browser_get_text` | 抽整页文字 | |
 | `browser_click_element` | 按名字点击 | |
 | `browser_click_text` | 按文字点击 + 回报状态 | ✅ |

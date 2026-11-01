@@ -53,7 +53,8 @@ description: 操控用户已经打开、正在运行的 Edge/Chrome/Firefox（�
 
 ## 铁律（每条都是踩过的坑）
 
-0. **不要启动、关闭或重启浏览器。** 工具只操作已经存在的窗口。浏览器"不见了"通常是关掉最后一个窗口后进程常驻（任务栏无图标），用 `browser_windows` 看 `(no window — will be restored)` 标记，或直接调工具让它自己 `wake`。**执行 `msedge.exe` / `chrome.exe` 是最严重的错误**——它会多开一个窗口和一个标签，破坏用户现场。
+0. **不要启动、关闭或重启浏览器。** 工具层已经硬拒绝 `CTRL+W/F4` 和窗口按钮，不要试图绕过（`allowClose` / `--force`）。
+0.5 **只点网页内容，不点浏览器自己的按钮。** 所有按名字查找都限定在 `Document` 子树里；如果报「matched a browser window control」，说明页面里真的没有这个元素，换个名字或先 `snapshot` 看看。 工具只操作已经存在的窗口。浏览器"不见了"通常是关掉最后一个窗口后进程常驻（任务栏无图标），用 `browser_windows` 看 `(no window — will be restored)` 标记，或直接调工具让它自己 `wake`。**执行 `msedge.exe` / `chrome.exe` 是最严重的错误**——它会多开一个窗口和一个标签，破坏用户现场。
 1. **点击前先拿到坐标。** 坐标来自 `browser_snapshot` 的 `cx,cy`（物理像素，虚拟屏幕可能是负原点），不要凭空算。
 2. **搜索/列表页要按标题选，不要按位置猜。** 先 `browser_page_query` 的 `items` op 拿到「标题 + 链接」列表，逐条读标题再决定点哪个。标题和目标不符就换关键词或翻页——不要挑一个看起来像的就点。
 3. **不要在用户正在输入的输入框里注入文字。** 先用 `uia --type Edit` 看有没有占位符/草稿；`type` 会插在光标处而不是覆盖。真要写先 `key CTRL+A` 再写。

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>bctl 守卫测试页</title>
+<style>
+  body { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; padding: 40px; background: #f6f8fa; }
+  h1 { font-size: 20px; }
+  .card { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; padding: 24px; max-width: 560px; }
+  button { font-size: 15px; padding: 8px 18px; margin-right: 12px; border-radius: 6px; border: 1px solid #d0d7de; background: #fff; cursor: pointer; }
+  #hit { color: #1a7f37; font-weight: 600; }
+  .note { color: #57606a; font-size: 13px; margin-top: 18px; line-height: 1.7; }
+</style>
+</head>
+<body>
+  <h1>bctl 守卫测试页</h1>
+  <div class="card">
+    <p>这个页面里有一个按钮，名字叫「关闭」。它和浏览器标题栏的关闭按钮同名。</p>
+    <p>
+      <button id="fake-close" onclick="document.getElementById('hit').textContent='页面按钮被点到了';document.getElementById('hit').dataset.clicked='1'">关闭</button>
+      <button id="other">无关按钮</button>
+    </p>
+    <p id="hit">页面按钮还没被点到</p>
+    <p class="note">
+      正确行为：<code>clickel &lt;pid&gt; 关闭</code> 点到这里这个按钮，页面提示变成「页面按钮被点到了」，<b>浏览器窗口不动</b>。<br>
+      错误行为：点到标题栏的关闭按钮，窗口直接消失。
+    </p>
+  </div>
+</body>
+</html>

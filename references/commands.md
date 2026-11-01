@@ -8,7 +8,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\bctl.ps1 <command> [
 
 参数规则：
 
-- `--json` 输出单行 JSON（`{"ok":true,...}` 或 `{"ok":false,"error":"..."}`）
+- `--json` 输出单行 JSON（`{"ok":true,...}` 或 `{"ok":false,"error":"..."}`）；
+  非 ASCII 字符一律转成 `\uXXXX`，保证跨进程、跨代码页读取都不会被截断
 - `--key value` 形式传参，`--flag` 形式传布尔
 - 位置参数顺序见下表
 - 中文参数建议用 `--file` 从 UTF-8 文件读入，避免控制台编码损失
@@ -93,15 +94,26 @@ index selected name                                   rect
 ### `tab <pid> <1-9>` / `newtab` / `closetab`
 内部发 `CTRL+1..9` / `CTRL+T` / `CTRL+W`，执行前自动 `focus`。
 
-### `nav <pid> <url>`
-`CTRL+L` → `CTRL+A` → 输入 URL → `ENTER`。
+### `nav <pid> <url> [--new-tab]`
+默认**幂等**：先看当前标签页是不是已经在目标地址，再按域名扫其它标签页的标题；
+命中就切过去并返回 `reused: true`，什么都不重新加载。都不命中才走地址栏导航。
+
+```powershell
+bctl.ps1 nav 13008 "https://example.com"          # 已开着 → reused
+bctl.ps1 nav 13008 "https://example.com" --new-tab # 强制真的导航
+```
+
+导航前后各记一次窗口状态；窗口中途消失会返回明确错误。
 
 ---
 
 ## 无障碍树
 
-### `uia <pid> [--type T] [--pattern re] [--limit N]`
-导出全部后代节点。字段：`name type automationId className rect x y w h cx cy enabled offscreen`。
+### `uia <pid> [--type T] [--pattern re] [--limit N] [--chrome]`
+导出网页子树（`Document` 之下）的全部节点。字段：`name type automationId className rect x y w h cx cy enabled offscreen`。
+
+**默认不含窗口 chrome**：标题栏的最小化/还原/关闭按钮既不出现也不能点。
+加 `--chrome` 才会包含（只读排查用，点击仍受保护）。页面还没渲染好时会直接报错让你重试，**不会**回退到窗口树。
 
 `--type` 取 `Button` `Edit` `Text` `Hyperlink` `Document` `TabItem` `ListItem` `ComboBox` `CheckBox` `Image` `Group` `Pane` `ToolBar` 等。
 
@@ -119,9 +131,17 @@ bctl.ps1 uia 13008 --pattern "登录|Sign in"
 
 ## 交互
 
-### `clickel <pid> <名字> [--type T]`
+### `clickel <pid> <名字> [--type T] [--chrome] [--force]`
 按元素名找到元素 → 取包围盒中心 → `focus` → 点击。
-名字先精确匹配，失败再按正则转义后模糊匹配。
+名字先精确匹配，失败再按正则转义后模糊匹配。**只在网页内容里找**。
+
+两道闸：
+
+1. 元素必须位于 `Document` 子树内，否则拒绝——
+   `'关闭' matched a browser window control ... Nothing was clicked.`
+2. `--chrome` 模式下命中 `最小化/还原/关闭` 也拒绝，除非再加 `--force`。
+
+点击前后各记一次窗口状态，点完窗口如果不见了会立刻报错。
 
 ```powershell
 bctl.ps1 clickel 13008 "安装" --type Button
@@ -148,6 +168,10 @@ bctl.ps1 clickel 13008 "安装" --type Button
 - 中文、emoji、全角符号都能进
 - **绕开输入法**，但会打断用户正在进行的 IME 组合
 - 插入到当前光标处，不覆盖已有内容；要覆盖先 `key CTRL+A`
+
+### `key <组合键> [--allow-close]`
+`CTRL+W` / `CTRL+F4` / `ALT+F4` / `CTRL+SHIFT+W` / `CTRL+Q` 默认**拒绝执行**：
+关掉最后一扇窗会让浏览器进入「进程在、窗口没了」的状态。要关得显式加 `--allow-close`。
 
 ### `key <组合键>`
 ```
@@ -243,6 +267,14 @@ bctl.ps1 js --op clickText --args '{"text":"点赞"}'
 ---
 
 ## 杂项
+
+### `ensure [--reopen]`
+浏览器状态机，四种结果：`absent` / `windowless` / `hidden`（自动恢复）/ `ok`。
+`--reopen` 是唯一会启动浏览器的路径，且必须人工显式加。
+
+### `audit tail [n]`
+打印 `~\.dsh\browser-bridge\audit.log` 最后 n 条（默认 20）。每条动作带
+`before/after` 的窗口 handle 与可见性，用来定位「哪一步之后窗口没了」。
 
 ### `wait <ms>`
 ### `clip get` / `clip set <文本>`

@@ -55,6 +55,7 @@ public static class BctlNative {
     [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr ctx);
     [DllImport("shcore.dll")] public static extern int SetProcessDpiAwareness(int v);
     [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr h, uint cmd);
 
     public const uint MWHEEL = 0x0800, MHWHEEL = 0x1000;
     public const uint LDOWN = 0x0002, LUP = 0x0004, RDOWN = 0x0008, RUP = 0x0010, MDOWN = 0x0020, MUP = 0x0040;
@@ -279,13 +280,85 @@ function Get-BctlElementInfo {
     }
 }
 
+
+# 窗口自身按钮（标题栏 chrome）的名字。出现在窗口根下、页面之外，
+# 点到它们等于关窗/最小化，必须结构性排除。
+$script:DangerWindowNames = '^(最小化|最大化|还原|向下还原|关闭|关闭窗口|Close|Close window|Minimize|Maximize|Restore|×|✕|✖)$'
+
+function Get-BctlPageRoot {
+    # 网页内容的根节点。Chromium 把整个 DOM 投影到 ControlType.Document 之下，
+    # 标题栏按钮在它外面——所有查找都从这里开始，就从结构上碰不到关窗按钮。
+    param([uint32]$ProcessId)
+    $root = Get-BctlUiaRoot -ProcessId $ProcessId
+    if (-not $root) { return $null }
+    $c = New-Object System.Windows.Automation.PropertyCondition($script:AE::ControlTypeProperty, $script:CT::Document)
+    return $root.FindFirst($script:TS::Descendants, $c)
+}
+
+function Test-BctlInPageTree {
+    # 元素是否位于页面根之下。用来在点击前做最后一道校验。
+    param($Element, $PageRoot)
+    if (-not $Element -or -not $PageRoot) { return $false }
+    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+    $cur = $Element
+    $guard = 0
+    while ($cur -and $guard -lt 200) {
+        try {
+            if ([System.Windows.Automation.Automation]::Compare($cur, $PageRoot)) { return $true }
+            $cur = $walker.GetParent($cur)
+        }
+        catch { break }
+        $guard++
+    }
+    return $false
+}
+
+function Test-BctlDangerName {
+    param([string]$Name)
+    if (-not $Name) { return $false }
+    return ($Name.Trim() -match $script:DangerWindowNames)
+}
+
+function Write-BctlAudit {
+    # 每个动作一行 JSON，落在 ~/.dsh/browser-bridge/audit.log，出问题能回溯。
+    param([string]$Action, [hashtable]$Data)
+    try {
+        $dir = Join-Path $env:USERPROFILE '.dsh\browser-bridge'
+        if (-not (Test-Path $dir)) { [void](New-Item -ItemType Directory -Path $dir -Force) }
+        $file = Join-Path $dir 'audit.log'
+        if ((Test-Path $file) -and ((Get-Item $file).Length -gt 1048576)) {
+            Move-Item -Path $file -Destination ($file + '.1') -Force -ErrorAction SilentlyContinue
+        }
+        $rec = [ordered]@{ ts = (Get-Date).ToString('o'); action = $Action }
+        if ($Data) { foreach ($k in $Data.Keys) { $rec[$k] = $Data[$k] } }
+        Add-Content -Path $file -Value ($rec | ConvertTo-Json -Compress -Depth 4) -Encoding UTF8 -ErrorAction SilentlyContinue
+    }
+    catch { }
+}
+
+function Get-BctlWindowState {
+    param([int64]$Handle)
+    if (-not $Handle) { return $null }
+    $h = [IntPtr]$Handle
+    $r = [BctlNative]::Frame($h)
+    return [pscustomobject]@{
+        handle  = $Handle
+        visible = [BctlNative]::IsWindowVisible($h)
+        iconic  = [BctlNative]::IsIconic($h)
+        rect    = ('{0},{1} {2}x{3}' -f $r.Left, $r.Top, ($r.Right - $r.Left), ($r.Bottom - $r.Top))
+    }
+}
+
 function Find-BctlElement {
     param(
         [uint32]$ProcessId,
         [string]$Name,
-        [string]$Type
+        [string]$Type,
+        [ValidateSet('page', 'window')][string]$Scope = 'page'
     )
-    $root = Get-BctlUiaRoot -ProcessId $ProcessId
+    $root = if ($Scope -eq 'window') { Get-BctlUiaRoot -ProcessId $ProcessId } else { Get-BctlPageRoot -ProcessId $ProcessId }
+    # 页面作用域下绝不回退到窗口根：窗口根里有最小化/关闭按钮，
+    # 回退等于把危险目标重新放进射程。页面没就绪就让调用方等一等。
     if (-not $root) { return $null }
     $conds = New-Object System.Collections.ArrayList
     if ($Name) { $null = $conds.Add((New-Object System.Windows.Automation.PropertyCondition($script:AE::NameProperty, $Name))) }
@@ -299,8 +372,8 @@ function Find-BctlElement {
 }
 
 function Find-BctlElements {
-    param([uint32]$ProcessId, [string]$Pattern, [string]$Type, [int]$Limit = 200)
-    $root = Get-BctlUiaRoot -ProcessId $ProcessId
+    param([uint32]$ProcessId, [string]$Pattern, [string]$Type, [int]$Limit = 200, [ValidateSet('page', 'window')][string]$Scope = 'page')
+    $root = if ($Scope -eq 'window') { Get-BctlUiaRoot -ProcessId $ProcessId } else { Get-BctlPageRoot -ProcessId $ProcessId }
     if (-not $root) { return @() }
     $cond = [System.Windows.Automation.Condition]::TrueCondition
     if ($Type) {

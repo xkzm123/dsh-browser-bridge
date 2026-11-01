@@ -19,6 +19,37 @@ bctl.ps1 doctor | Select-String browsers
 
 ---
 
+## 一·五、浏览器整窗消失了（进程在、任务栏没图标、声音还在放）
+
+这是 **Windows 上关掉最后一扇窗口后进程常驻** 的状态：窗口对象没了，任务栏自然也没图标。
+
+先跑：
+
+```powershell
+bctl.ps1 ensure
+```
+
+| 输出 | 含义 | 怎么办 |
+|---|---|---|
+| `state: ok` | 窗口正常 | 你看到的消失可能是别的进程 |
+| `state: hidden` | 窗口被隐藏，已自动恢复 | 已经帮你拉回来了 |
+| `state: windowless` | 进程在、零窗口 | 点任务栏图标；或 `ensure --reopen`（会在原 profile 开窗，登录态不丢） |
+| `state: absent` | 进程都没有 | 自己打开浏览器 |
+
+**为什么会变成这样**：多半是某一步点到了标题栏的关闭按钮，或发了 `CTRL+W`。旧版本按名字找元素时会搜整个窗口树，页面里一个叫「关闭」的按钮和标题栏那个同名——`FindFirst` 按深度优先返回第一个，命中的是标题栏。
+
+现在已从结构上修掉：查找只限 `Document` 子树，且点击前还会再校验一次祖先链。想复现验证就跑：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\test-guard.ps1
+```
+
+想看是哪一步出事：
+
+```powershell
+bctl.ps1 audit tail 20
+```
+
 ## 二、UIA 看不见页面
 
 ```
