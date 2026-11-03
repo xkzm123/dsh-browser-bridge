@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         dsh-browser-bridge
 // @namespace    https://github.com/xkzm123/dsh-browser-bridge
-// @version      1.3.1
+// @version      1.5.0
 // @description  Lets a DeepSeek Harness session read and drive an already-running browser, without restarting it or enabling remote debugging.
 // @author       xkzm123
 // @match        *://*/*
 // @connect      127.0.0.1
 // @connect      localhost
 // @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
 // @run-at       document-idle
 // @noframes
 // ==/UserScript==
@@ -15,7 +16,16 @@
 (function () {
     'use strict';
 
-    const PORT = 8737;
+    // 端口从 Tampermonkey 存储读，默认 8737，与 dsh 插件配置的 bridgePort 对齐。
+    // 旧实现把它写死，插件端一改端口，桥就再也连不上，且没有任何提示。
+    const PORT = (() => {
+        try {
+            const v = Number(GM_getValue('dsh-bridge-port', 8737));
+            return Number.isFinite(v) && v > 0 && v < 65536 ? v : 8737;
+        } catch {
+            return 8737;
+        }
+    })();
     const BASE = `http://127.0.0.1:${PORT}`;
     const POLL_MS = 400;
     const MAX_RESULT = 200000;
@@ -38,7 +48,9 @@
             GM_xmlhttpRequest({
                 method: 'POST',
                 url: BASE + path,
-                headers: { 'Content-Type': 'application/json' },
+                // 自定义头是桥的鉴权：普通网页发这个请求会先触发 CORS 预检，
+                // 而服务端不响应 OPTIONS，于是请求到不了队列。
+                headers: { 'Content-Type': 'application/json', 'X-DSH-Bridge': '1' },
                 data: JSON.stringify(data),
                 timeout: 4000,
                 onload: (r) => { try { resolve(JSON.parse(r.responseText)); } catch { resolve(null); } },
@@ -53,6 +65,7 @@
             GM_xmlhttpRequest({
                 method: 'GET',
                 url: BASE + path,
+                headers: { 'X-DSH-Bridge': '1' },
                 timeout: 4000,
                 onload: (r) => { try { resolve(JSON.parse(r.responseText)); } catch { resolve(null); } },
                 onerror: () => resolve(null),
@@ -171,7 +184,16 @@
         fill: (a) => {
             const el = pick(a.selector);
             el.focus();
-            el.value = a.value ?? '';
+            const value = a.value ?? '';
+            // 直接 el.value = x 对 React/Vue 的受控组件无效：框架的 value tracker
+            // 认为值没变，onChange 不触发，提交时读到的还是空值。
+            // 必须走原型上的原生 setter，再补一次 input/change 事件。
+            const proto = el instanceof HTMLTextAreaElement
+                ? HTMLTextAreaElement.prototype
+                : (el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype);
+            const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+            if (desc && desc.set) desc.set.call(el, value);
+            else el.value = value;
             el.dispatchEvent(new Event('input', { bubbles: true }));
             el.dispatchEvent(new Event('change', { bubbles: true }));
             return 'filled';
@@ -180,7 +202,10 @@
             const el = pick(a.selector);
             const form = el.form ?? el.closest('form');
             if (!form) throw new Error('no form for ' + a.selector);
-            form.submit();
+            // form.submit() 会绕过 submit 事件，页面的校验、埋点、SPA 路由全部不触发。
+            // requestSubmit 走完整事件链，只有老环境才退回 submit()。
+            if (typeof form.requestSubmit === 'function') form.requestSubmit();
+            else form.submit();
             return 'submitted';
         },
         cookies: () => document.cookie,
@@ -269,18 +294,21 @@
             const __click = (s) => { const e = typeof s === 'string' ? document.querySelector(s) : s; if (e) e.click(); return !!e; };
             const __sleep = (ms) => new Promise(r => setTimeout(r, ms));
         `;
-        const value = await (new AsyncFunction(helpers + job.code))();
-        if (value !== undefined) {
-            return { value: stringify(value), ms: Math.round(performance.now() - t0) };
-        }
-        // the code was a bare expression, e.g. "document.title + location.href"
-        let fallback;
+        // 只执行一次。旧实现先按语句块跑一遍，返回 undefined 再按表达式跑第二遍，
+        // 于是 __q('.like').click()、fetch(POST) 这类动作全部执行两次。
+        // 现在反过来：先当表达式（一条语句也合法，且只跑一次），
+        // 只有语法上不是表达式时才退回语句块，那时代码还没执行过，副作用仍是 0。
+        let value;
         try {
-            fallback = await (new AsyncFunction(helpers + 'return (' + job.code + ');'))();
-        } catch {
-            fallback = undefined;
+            value = await (new AsyncFunction(helpers + 'return (' + job.code + ');'))();
+        } catch (e) {
+            if (e instanceof SyntaxError) {
+                value = await (new AsyncFunction(helpers + job.code))();
+            } else {
+                throw e;
+            }
         }
-        return { value: stringify(fallback), ms: Math.round(performance.now() - t0) };
+        return { value: stringify(value), ms: Math.round(performance.now() - t0) };
     }
 
     /** 等这个标签页变成可见，最多 ms 毫秒；超时返回 false。 */
@@ -336,7 +364,7 @@
 
     window.__DSH_BRIDGE__ = {
         port: PORT,
-        version: '1.3.1',
+        version: '1.5.0',
         eval: evalOk,
         ops: Object.keys(OPS),
         ping: () => get('/ping'),

@@ -1,4 +1,4 @@
-﻿# server.ps1 - localhost command bridge for dsh-browser-bridge
+﻿# server.ps1 - localhost command bridge for dsh-browser-bridge (v1.5.0)
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File server.ps1 -Port 8737
 #
@@ -74,11 +74,13 @@ function Read-HttpRequest {
 function Send-Response {
     param($Stream, [string]$Body, [string]$Status = '200 OK', [string]$ContentType = 'application/json; charset=utf-8')
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($Body)
+    # 不再发 Access-Control-Allow-Origin: *。
+    # 那个头等于对整台机器的浏览器宣告「任何站点都能读这个本地服务的响应」，
+    # 配合无鉴权的 /cmd 就是一条从任意网页到页面脚本执行的链路。
+    # 油猴用 GM_xmlhttpRequest 发请求，不走 CORS，不需要这个头。
     $head = "HTTP/1.1 $Status`r`n" +
     "Content-Type: $ContentType`r`n" +
     "Content-Length: $($bytes.Length)`r`n" +
-    "Access-Control-Allow-Origin: *`r`n" +
-    "Access-Control-Allow-Headers: content-type`r`n" +
     "Connection: close`r`n`r`n"
     $hb = [System.Text.Encoding]::ASCII.GetBytes($head)
     try {
@@ -118,8 +120,22 @@ while ($true) {
             }
         }
 
+        # 白名单外的路径一律要求桥头；/install.user.js 是浏览器直接导航，
+        # 不带头，它只回一段公开脚本，不需要保护。
+        if ($pathOnly -notmatch '^/install\.user\.js$') {
+            $hdr = [string]$req.headers['x-dsh-bridge']
+            if ($hdr -ne '1') {
+                Send-Response $stream (Write-Json @{ ok = $false; error = 'missing X-DSH-Bridge header' }) '403 Forbidden'
+                $client.Close()
+                continue
+            }
+        }
+
         switch -Regex ($pathOnly) {
 
+            # 鉴权：除取用油猴脚本本身，所有请求都必须带 X-DSH-Bridge 头。
+            # 普通网页想带自定义头必须先过 CORS 预检，而下面刻意不实现 OPTIONS，
+            # 于是任意页面的 fetch('http://127.0.0.1:8737/cmd') 都到不了队列。
             '^/ping$' {
                 Send-Response $stream (Write-Json @{ ok = $true; pending = $script:order.Count; version = 1 })
             }
@@ -139,6 +155,13 @@ while ($true) {
                 try { $payload = $req.body | ConvertFrom-Json } catch { Send-Response $stream (Write-Json @{ ok = $false; error = 'bad json' }) '400 Bad Request'; break }
                 $script:seq++
                 $id = $script:seq
+                # 长期挂着的桥不能无界增长：旧实现 jobs/results 只增不减，
+                # 跑几万次任务后内存一直涨。超过阈值就整体回收。
+                if ($script:jobs.Count -gt 800) {
+                    $script:jobs.Clear()
+                    $script:order.Clear()
+                }
+                if ($script:results.Count -gt 800) { $script:results.Clear() }
                 $script:jobs[$id] = @{ code = $payload.code; op = $payload.op; args = $payload.args; created = (Get-Date) }
                 $script:order.Enqueue($id) | Out-Null
                 Send-Response $stream (Write-Json @{ ok = $true; id = $id })

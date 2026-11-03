@@ -11,7 +11,7 @@ description: 操控用户已经打开、正在运行的 Edge/Chrome/Firefox（�
 ## 两种用法
 
 - **插件模式**（推荐）：`dsh plugin --profile web add github:xkzm123/dsh-browser-bridge`，
-  会话里直接多出 16 个 `browser_*` 工具，不需要命令行。
+  会话里直接多出 22 个 `browser_*` 工具，不需要命令行。
 - **技能模式**（本文件）：`install.ps1` 装到 `~/.dsh/skills/`，用 `scripts/bctl.ps1` 下命令。
 
 两种模式共用同一套 PowerShell 实现，行为一致。下面是命令与纪律。
@@ -57,7 +57,7 @@ description: 操控用户已经打开、正在运行的 Edge/Chrome/Firefox（�
 0.5 **只点网页内容，不点浏览器自己的按钮。** 所有按名字查找都限定在 `Document` 子树里；如果报「matched a browser window control」，说明页面里真的没有这个元素，换个名字或先 `snapshot` 看看。 工具只操作已经存在的窗口。浏览器"不见了"通常是关掉最后一个窗口后进程常驻（任务栏无图标），用 `browser_windows` 看 `(no window — will be restored)` 标记，或直接调工具让它自己 `wake`。**执行 `msedge.exe` / `chrome.exe` 是最严重的错误**——它会多开一个窗口和一个标签，破坏用户现场。
 1. **点击前先拿到坐标。** 坐标来自 `browser_snapshot` 的 `cx,cy`（物理像素，虚拟屏幕可能是负原点），不要凭空算。
 2. **搜索/列表页要按标题选，不要按位置猜。** 先 `browser_page_query` 的 `items` op 拿到「标题 + 链接」列表，逐条读标题再决定点哪个。标题和目标不符就换关键词或翻页——不要挑一个看起来像的就点。
-3. **不要在用户正在输入的输入框里注入文字。** 先用 `uia --type Edit` 看有没有占位符/草稿；`type` 会插在光标处而不是覆盖。真要写先 `key CTRL+A` 再写。
+3. **不要在用户正在输入的输入框里注入文字。** `type` 与 `key` 现在必须带 `--pid`，发键前会校验前台窗口确实是目标浏览器；校验失败一个字符都不发。如果报「refused to send」，先把浏览器切到前台，不要重试。 先用 `uia --type Edit` 看有没有占位符/草稿；`type` 会插在光标处而不是覆盖。真要写先 `key CTRL+A` 再写。
 3. **每次操作都要能撤回。** 改人草稿、切标签页、关页面之前，先把原状态记下来（`text`、`url`、`tabs`）。
 4. **`type` 是 Unicode 直送，绕开输入法**——中文能打进去，但会打断用户正在进行的拼音组合。
 5. **切前台是必要的。** `click` 打在后台窗口上等于点在别的东西上；`focus` 失败就用 `clickel`（内部会先 focus）。
@@ -99,8 +99,8 @@ bctl.ps1 clickel <pid> "<元素名>" [--type T]
 bctl.ps1 click <x> <y> [left|right|middle] [--double]
 bctl.ps1 drag <x1> <y1> <x2> <y2>
 bctl.ps1 scroll <x> <y> <±delta>
-bctl.ps1 type "<文本>" | type --file txt
-bctl.ps1 key CTRL+L
+bctl.ps1 type "<文本>" --pid <pid>       # --pid 必填：没有目标，文字会打进用户当前的任意窗口
+bctl.ps1 key CTRL+L --pid <pid>          # 同上，--pid 必填
 bctl.ps1 shot [--win <pid>] [--region x,y,w,h] [--file out.png] [--jpeg]
 bctl.ps1 at <x> <y> [--pid <pid>]      # 坐标反查元素，点之前先确认落点
 bctl.ps1 pixel <x> <y>                 # 一个像素的颜色，判状态不用截图

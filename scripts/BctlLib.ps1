@@ -2,7 +2,13 @@
 # Pure PowerShell 5.1 + .NET Framework. No external dependency.
 # Dot-source this file, then call the exported functions.
 
-$script:BctlVersion = '1.4.0'
+$script:BctlVersion = '1.5.0'
+
+# 浏览器进程与窗口类白名单：全项目只此一份，bctl.ps1 直接复用。
+# 之前 index.js / BctlLib / bctl 各写一遍，加一个浏览器要改三处，必然漂移。
+$script:BrowserProcessNames = @('msedge', 'chrome', 'brave', 'vivaldi', 'opera', 'chromium', 'thorium', 'firefox', 'librewolf', 'arc')
+$script:BrowserProcessRegex = '^(msedge|chrome|brave|vivaldi|opera|chromium|thorium|firefox|librewolf|arc)$'
+$script:UiaWindowClasses = @('Chrome_WidgetWin_1', 'MozillaWindowClass')
 $script:UiaDir = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\'
 $ErrorActionPreference = 'Continue'
 
@@ -43,6 +49,8 @@ public static class BctlNative {
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
+    [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr h);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool f);
     [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
@@ -114,18 +122,25 @@ public static class BctlNative {
         SendInput(1, a, Marshal.SizeOf(typeof(INPUT)));
     }
 
-    public static void ForceForeground(IntPtr h) {
+    public static bool ForceForeground(IntPtr h) {
         if (IsIconic(h)) ShowWindow(h, 9);
         IntPtr fg = GetForegroundWindow();
+        if (fg == h) return true;
         uint pid;
         uint ft = GetWindowThreadProcessId(fg, out pid);
         uint ct = GetCurrentThreadId();
-        bool attached = AttachThreadInput(ct, ft, true);
+        bool attached = false;
+        try { attached = AttachThreadInput(ct, ft, true); } catch { }
+        // ALT 轻敲让 Windows 认为本次输入来自前台线程，随后 SetForegroundWindow 才被放行
         keybd_event(0x12, 0, 0, IntPtr.Zero);
         keybd_event(0x12, 0, 2, IntPtr.Zero);
+        try { BringWindowToTop(h); } catch { }
         SetForegroundWindow(h);
-        ShowWindow(h, 5);
-        if (attached) AttachThreadInput(ct, ft, false);
+        try { SetFocus(h); } catch { }
+        // 刻意不调 ShowWindow(h, 5)：对隐藏窗口 SW_SHOW 会把 Edge 关窗后残留的
+        // 空壳 HWND 重新显示出来，用户看到的就是「浏览器自己又开了一个窗口」。
+        if (attached) { try { AttachThreadInput(ct, ft, false); } catch { } }
+        return GetForegroundWindow() == h;
     }
 
     public static RECT Frame(IntPtr h) {
@@ -199,24 +214,6 @@ $script:TS = [System.Windows.Automation.TreeScope]
 $script:CT = [System.Windows.Automation.ControlType]
 
 # ---------------------------------------------------------------- helpers
-function Get-BctlBinding {
-    # Browser process families we can drive through UIA (Chromium exposes
-    # ClassName 'Chrome_WidgetWin_1'; Gecko is handled through the plain HWND).
-    $browsers = @('chrome', 'msedge', 'brave', 'vivaldi', 'opera', 'thorium', 'chromium', 'Arc', 'firefox')
-    $map = @{}
-    foreach ($p in Get-Process -ErrorAction SilentlyContinue) {
-        if ($browsers -contains $p.ProcessName) {
-            $map[[uint32]$p.Id] = @{
-                pid    = [uint32]$p.Id
-                name   = $p.ProcessName
-                handle = $p.MainWindowHandle
-                title  = $p.MainWindowTitle
-            }
-        }
-    }
-    return $map
-}
-
 function Get-BctlWindows {
     param([switch]$IncludeHidden)
     $list = New-Object System.Collections.ArrayList
@@ -253,20 +250,43 @@ function Get-BctlWindows {
 }
 
 function Resolve-BctlWindow {
-    # 同一个进程往往有多个顶层窗口（工具提示、隐藏的辅助窗口、真实窗口框架）。
-    # 必须挑「面积最大的那个窗口」，否则会绑到 146x21 的 helper 上，
-    # 截图/导航/无障碍查询全部落到错误的窗口，上层就会以为浏览器坏了。
+    # 选窗口的唯一定义。三条规则，顺序不能换：
+    #   1. "pid:handle" 精确句柄优先。插件层传的就是这个形式，避免按 pid 二次解析时
+    #      选到同一进程的另一个窗口（Edge 一个进程常常挂着 3 个顶层窗口）。
+    #   2. 只有「可见」窗口才是候选。隐藏窗口是关窗后残留的空壳 HWND，
+    #      对它激活会把后台空窗口复活——这正是「浏览器莫名被重开」的来源。
+    #   3. 可见窗口里挑面积最大的，排除 146x21 的 helper。
     param([string]$Spec, [switch]$AllowHidden)
-    $all = Get-BctlWindows -IncludeHidden:$AllowHidden
-    if ($Spec -match '^\d+$') {
-        $cands = @($all | Where-Object { $_.pid -eq [uint32]$Spec -and $_.w -ge 300 -and $_.h -ge 200 })
-        if ($cands.Count -eq 0) { $cands = @($all | Where-Object { $_.pid -eq [uint32]$Spec }) }
-        if ($cands.Count -eq 0) { return $null }
-        return ($cands | Sort-Object -Property @{ Expression = { [int64]$_.w * [int64]$_.h }; Descending = $true } | Select-Object -First 1)
+    if (-not $Spec) { return $null }
+
+    if ($Spec -match '^(\d+):(\d+)$') {
+        $wantPid = [uint32]$matches[1]
+        $wantHandle = [int64]$matches[2]
+        $hit = Get-BctlWindows -IncludeHidden |
+            Where-Object { $_.pid -eq $wantPid -and [int64]$_.handle -eq $wantHandle } |
+            Select-Object -First 1
+        if ($hit -and ($hit.visible -or $AllowHidden)) { return $hit }
+        # 句柄已失效（Edge 会重建顶层窗口）就退回按 pid 重新解析，而不是直接失败
+        $Spec = [string]$wantPid
     }
-    $cands = @($all | Where-Object { $_.title -like "*$Spec*" -and $_.w -ge 300 -and $_.h -ge 200 })
-    if ($cands.Count -eq 0) { $cands = @($all | Where-Object { $_.title -like "*$Spec*" }) }
+
+    $all = @(Get-BctlWindows -IncludeHidden)
+    if ($Spec -match '^\d+$') {
+        $cands = @($all | Where-Object { $_.pid -eq [uint32]$Spec })
+    }
+    else {
+        $cands = @($all | Where-Object { $_.title -like "*$Spec*" })
+    }
     if ($cands.Count -eq 0) { return $null }
+
+    $big = @($cands | Where-Object { $_.w -ge 300 -and $_.h -ge 200 })
+    if ($big.Count -gt 0) { $cands = $big }
+
+    if (-not $AllowHidden) {
+        $vis = @($cands | Where-Object { $_.visible })
+        if ($vis.Count -eq 0) { return $null }
+        $cands = $vis
+    }
     return ($cands | Sort-Object -Property @{ Expression = { [int64]$_.w * [int64]$_.h }; Descending = $true } | Select-Object -First 1)
 }
 
@@ -317,8 +337,11 @@ function Get-BctlElementInfo {
         y            = $y
         w            = $w
         h            = $h
-        cx           = $(if ($x -lt 0 -or $w -lt 0) { -1 } else { $x + [int]($w / 2) })
-        cy           = $(if ($y -lt 0 -or $h -lt 0) { -1 } else { $y + [int]($h / 2) })
+        # 用 UIA 自己的 IsOffscreen 判断，不要拿 x < 0 当判据：
+        # 副屏摆在主屏左边时（虚拟屏幕原点为负），页面元素坐标本来就是负数，
+        # 旧写法会把它们一律标成 offscreen，clickel 于是点到 (-1,cy) 上去。
+        cx           = $(if ($c.IsOffscreen -or $w -le 0 -or $h -le 0) { -1 } else { $x + [int]($w / 2) })
+        cy           = $(if ($c.IsOffscreen -or $w -le 0 -or $h -le 0) { -1 } else { $y + [int]($h / 2) })
         enabled      = $c.IsEnabled
         offscreen    = $c.IsOffscreen
     }
@@ -363,6 +386,15 @@ function Test-BctlDangerName {
     return ($Name.Trim() -match $script:DangerWindowNames)
 }
 
+function Protect-BctlText {
+    # 审计日志会记录元素名和 URL。凭据、token、cookie 一律先抹掉再落盘。
+    param([string]$Text, [int]$Max = 120)
+    if (-not $Text) { return $Text }
+    $out = $Text -replace '(?i)(token|passw(?:or)?d|pwd|secret|api[_-]?key|cookie|authorization|session[_-]?id|sid)=([^&\s]+)', '$1=***'
+    if ($out.Length -gt $Max) { $out = $out.Substring(0, $Max) + "…" }
+    return $out
+}
+
 function Write-BctlAudit {
     # 每个动作一行 JSON，落在 ~/.dsh/browser-bridge/audit.log，出问题能回溯。
     param([string]$Action, [hashtable]$Data)
@@ -374,7 +406,13 @@ function Write-BctlAudit {
             Move-Item -Path $file -Destination ($file + '.1') -Force -ErrorAction SilentlyContinue
         }
         $rec = [ordered]@{ ts = (Get-Date).ToString('o'); action = $Action }
-        if ($Data) { foreach ($k in $Data.Keys) { $rec[$k] = $Data[$k] } }
+        if ($Data) {
+            foreach ($k in $Data.Keys) {
+                $v = $Data[$k]
+                if ($v -is [string]) { $v = Protect-BctlText -Text $v }
+                $rec[$k] = $v
+            }
+        }
         Add-Content -Path $file -Value ($rec | ConvertTo-Json -Compress -Depth 4) -Encoding UTF8 -ErrorAction SilentlyContinue
     }
     catch { }
@@ -437,6 +475,9 @@ function Find-BctlElements {
     return $out
 }
 
+# 页面文本上限：一个几 MB 的 JSON 会撑爆调用方 stdout 缓冲，也会白烧上下文。
+$script:MaxTextChars = 200000
+
 function Get-BctlDocument {
     param([uint32]$ProcessId)
     $root = Get-BctlUiaRoot -ProcessId $ProcessId
@@ -446,11 +487,40 @@ function Get-BctlDocument {
 }
 
 # ---------------------------------------------------------------- actions
+function Assert-BctlFocus {
+    # 键盘/文字输入前的最后一道闸：前台不是目标窗口就抛异常，一个字符都不发。
+    # 没有这道检查时，SendInput 会打进用户当前正在用的编辑器/聊天框里。
+    param([int64]$Handle = 0, [uint32]$ProcessId = 0, [string]$What = 'input')
+    $fg = [int64][BctlNative]::GetForegroundWindow()
+    if ($Handle -and $fg -eq $Handle) { return }
+    # 同一浏览器进程的其它顶层窗口也算安全：翻译气泡、下载面板、权限提示
+    # 都是独立 HWND，但按键仍然落在浏览器里，不会跑进用户别的软件。
+    # 这里要拦的是「前台根本不是这个浏览器」，不是「不是那一个 HWND」。
+    if ($ProcessId) {
+        $wpid = [uint32]0
+        [void][BctlNative]::GetWindowThreadProcessId([IntPtr]$fg, [ref]$wpid)
+        if ($wpid -eq $ProcessId) { return }
+    }
+    throw ("refused to send ${What}: the target browser window is not in the foreground. " +
+        'Bring it to the front first; otherwise the keystrokes would land in whatever app the user has focused. Nothing was sent.')
+}
+
 function Set-BctlForeground {
+    # 返回 $true 才算真的把目标窗口调到了前台。所有调用方都必须检查返回值。
     param($Window)
-    [void][BctlNative]::ForceForeground([IntPtr]$Window.handle)
-    Start-Sleep -Milliseconds 250
-    return [BctlNative]::GetForegroundWindow() -eq [IntPtr]$Window.handle
+    if (-not $Window) { return $false }
+    $h = [IntPtr][int64]$Window.handle
+    # 隐藏窗口不接受激活：SW_SHOW 会把它显示出来，等于凭空多一个浏览器窗口
+    if (-not [BctlNative]::IsWindowVisible($h)) { return $false }
+    # 夺前台本来就会被系统拦，一次不成很正常（另一个应用刚拿到焦点时尤甚），
+    # 所以重试三次；仍然失败就明确返回 $false，让调用方停手而不是盲发按键。
+    for ($i = 0; $i -lt 3; $i++) {
+        $ok = $false
+        try { $ok = [BctlNative]::ForceForeground($h) } catch { $ok = $false }
+        Start-Sleep -Milliseconds 180
+        if ($ok -or ([int64][BctlNative]::GetForegroundWindow() -eq [int64]$h)) { return $true }
+    }
+    return $false
 }
 
 function Invoke-BctlClick {
@@ -498,7 +568,7 @@ foreach ($ch in [char[]]'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') { $script:VkMap[
 foreach ($n in 0..9) { $script:VkMap['NUMPAD' + $n] = 0x60 + $n }
 
 function Invoke-BctlKey {
-    param([string]$Combo)
+    param([string]$Combo, [int64]$GuardHandle = 0, [uint32]$GuardPid = 0)
     $parts = $Combo.ToUpper() -split '\+'
     $vks = New-Object System.Collections.ArrayList
     foreach ($p in $parts) {
@@ -508,12 +578,18 @@ function Invoke-BctlKey {
         elseif ($k.Length -eq 1) { $null = $vks.Add([uint16][int][char]$k) }
         else { throw "unknown key: $k" }
     }
+    if ($GuardHandle -or $GuardPid) {
+        Assert-BctlFocus -Handle $GuardHandle -ProcessId $GuardPid -What ("keys '" + $Combo + "'")
+    }
     foreach ($v in $vks) { [BctlNative]::KeyEvent($v, $false); Start-Sleep -Milliseconds 25 }
     for ($i = $vks.Count - 1; $i -ge 0; $i--) { [BctlNative]::KeyEvent($vks[$i], $true); Start-Sleep -Milliseconds 25 }
 }
 
 function Invoke-BctlType {
-    param([string]$Text)
+    param([string]$Text, [int64]$GuardHandle = 0, [uint32]$GuardPid = 0)
+    if ($GuardHandle -or $GuardPid) {
+        Assert-BctlFocus -Handle $GuardHandle -ProcessId $GuardPid -What 'text'
+    }
     [BctlNative]::TypeUnicode($Text)
 }
 

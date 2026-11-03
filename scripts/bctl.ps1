@@ -27,6 +27,10 @@ $script:pos = @()
 $script:cmd = 'help'
 $script:rest = @()
 $script:isJson = $false
+# 布尔开关的显式清单。解析器还额外把「下一个 token 本身就是 flag」当作布尔，
+# 所以 --chrome --limit 120 不会再让 --chrome 把 --limit 吃掉。
+$script:BoolFlags = @('json', 'all', 'double', 'triple', 'help', 'jpeg', 'keep-going', 'echo',
+    'allow-close', 'force', 'chrome', 'new-tab', 'reopen', 'no-reuse', 'quiet')
 
 function ConvertTo-AsciiJson {
     # --json 必须是 7-bit ASCII：调用方可能是别的进程、别的代码页，
@@ -100,17 +104,17 @@ function Fail {
 }
 
 function Normalize-BctlUrl {
-    # 只比 origin + path，忽略 query/fragment/末尾斜杠，用来判断「是不是已经开着」。
+    # 只做「无意义差异」的归一：大小写、末尾斜杠、file:// 前缀。
+    # query 与 hash 必须保留 —— 旧实现把它们整个丢掉，于是
+    #   /list?page=1 与 /list?page=2      -> 判为同一页，nav 静默不翻页
+    #   /app#/inbox  与 /app#/settings    -> 判为同一页，SPA 路由永远打不开
+    # 上层还会拿到 reused=true，以为导航成功，后续点击全落在错的页面上。
     param([string]$Url)
     if (-not $Url) { return '' }
     $u = $Url.Trim()
     # file:// 在地址栏里显示成 C:/... ，两边要比得了
     if ($u -match '^(?i)file:') {
         return (($u -replace '^(?i)file:/*', '').ToLower().TrimEnd('/'))
-    }
-    if ($u -match '^[a-zA-Z][a-zA-Z0-9+.\-]*://([^/?#]+)([^?#]*)') {
-        $hostPart = $matches[1].ToLower()
-        return ($hostPart + $matches[2].TrimEnd('/'))
     }
     return $u.ToLower().TrimEnd('/')
 }
@@ -147,16 +151,10 @@ function Invoke-BctlEnsure {
         $rows += $w
     }
     if ($rows.Count -eq 0) {
-        $hint = 'the browser process is alive but has no window. Windows cannot conjure one; ask the user to click the taskbar icon, or pass --reopen to start a window in the same profile (adds a window).'
-        if ($Reopen) {
-            $exe = ($procs | Select-Object -First 1).Path
-            try {
-                Start-Process -FilePath $exe | Out-Null
-                Start-Sleep -Milliseconds 2500
-                return [pscustomobject]@{ state = 'reopened'; exe = $exe }
-            }
-            catch { return [pscustomobject]@{ state = 'windowless'; processes = $procs.Count; hint = $hint; error = $_.Exception.Message } }
-        }
+        # 这里刻意不提供「帮你打开一个」的能力。
+        # 启动浏览器必然产生一个新窗口 + 一个新标签，破坏用户现场，
+        # 而且会被上层误读成「浏览器状态异常，需要重启」。
+        $hint = 'the browser process is alive but has no window. Ask the user to click the taskbar icon; this tool never launches a browser.'
         return [pscustomobject]@{ state = 'windowless'; processes = $procs.Count; hint = $hint }
     }
     $sort = @{ Expression = { [int64]$_.w * [int64]$_.h }; Descending = $true }
@@ -166,12 +164,12 @@ function Invoke-BctlEnsure {
         return [pscustomobject]@{ state = 'ok'; pid = $t.pid; handle = $t.handle; title = $t.title }
     }
     $t = $rows | Sort-Object -Property $sort | Select-Object -First 1
-    [void][BctlNative]::ShowWindow([IntPtr]$t.handle, 9)
-    [void][BctlNative]::ForceForeground([IntPtr]$t.handle)
-    Start-Sleep -Milliseconds 350
+    # 只报告，不 ShowWindow。恢复隐藏窗口正是「浏览器自己又冒出来一个」的成因，
+    # 而且 SW_SHOW 会把 Edge 关窗后残留的空壳窗口变成可见空窗口。
     return [pscustomobject]@{
-        state = 'hidden'; restored = $true; pid = $t.pid; handle = $t.handle
+        state = 'hidden'; restored = $false; pid = $t.pid; handle = $t.handle
         nowVisible = [BctlNative]::IsWindowVisible([IntPtr]$t.handle); title = $t.title
+        hint = 'the window is hidden. Ask the user to restore it from the taskbar; this tool will not show it for you.'
     }
 }
 
@@ -196,9 +194,17 @@ function Invoke-BctlCli {
         $a = $ArgList[$i]
         if ($a -like '--*') {
             $k = $a.TrimStart('-')
-            if ($k -in @('json', 'all', 'double', 'triple', 'help', 'jpeg', 'keep-going', 'echo')) { $script:flags[$k] = $true }
-            elseif ($i + 1 -lt $ArgList.Count) { $script:flags[$k] = $ArgList[$i + 1]; $i++ }
-            else { $script:flags[$k] = $true }
+            $next = if ($i + 1 -lt $ArgList.Count) { [string]$ArgList[$i + 1] } else { '' }
+            # 判定布尔开关：白名单内，或下一个 token 自己也是 flag，或没有下一个 token。
+            # 旧实现只认白名单，于是 --chrome 把 --limit 当成自己的值吞掉，
+            # limit 静默失效，位置参数里还多出一个孤儿数字。
+            if (($script:BoolFlags -contains $k) -or $next -eq '' -or $next -like '--*') {
+                $script:flags[$k] = $true
+            }
+            else {
+                $script:flags[$k] = $next
+                $i++
+            }
         }
         else { $null = $script:pos.Add($a) }
         $i++
@@ -227,8 +233,9 @@ dsh-browser-bridge / bctl  -  drive an already-running browser, no restart
   click <x> <y> [left|right|middle]   click (--double / --triple)
   drag <x1> <y1> <x2> <y2>            drag
   scroll <x> <y> <delta>              wheel, 120 = one notch, negative = down
-  type <text> | --file <path>         type text (unicode, bypasses IME)
-  key <combo>                         CTRL+L / CTRL+W / ENTER / F5 / PAGE_DOWN
+  type <text> --pid <pid>             type text (unicode, bypasses IME). --pid is required:
+                                      without a target the text lands in whatever app has focus
+  key <combo> --pid <pid>             CTRL+L / ENTER / F5 / PAGE_DOWN. --pid is required for the same reason
   shot [file] [--region x,y,w,h]      capture virtual screen (--jpeg [--quality N] = far smaller file)
   shot --win <pid> [--file path]      capture one window
   at <x> <y> [--pid <pid>]            what element sits at that point (UIA ElementFromPoint)
@@ -315,7 +322,7 @@ Global flags: --json (machine readable output)
             foreach ($w in (Get-BctlWindows -IncludeHidden)) {
                 $p = Get-Process -Id $w.pid -ErrorAction SilentlyContinue
                 if (-not $p) { continue }
-                if ($p.ProcessName -notmatch '^(msedge|chrome|brave|vivaldi|opera|chromium|thorium|firefox|librewolf)$') { continue }
+                if ($p.ProcessName -notmatch $script:BrowserProcessRegex) { continue }
                 if ($w.w -lt 300 -or $w.h -lt 200) { continue }
                 if ($seen.ContainsKey([string]$w.handle)) { continue }
                 $seen[[string]$w.handle] = $true
@@ -333,12 +340,17 @@ Global flags: --json (machine readable output)
                     title   = $w.title
                 }
             }
-            # 主窗口排前面：非弹窗优先，其次面积大的优先
-            $rows = @($rows | Sort-Object -Property @{ Expression = { [int]$_.dialog } }, @{ Expression = { [int64]$_.w * [int64]$_.h }; Descending = $true })
+            # 主窗口排前面：非弹窗 → 可见 → 前台 → 面积大。
+            # 「可见」必须参与排序：隐藏的是关窗后残留的空壳窗口，
+            # 把它当默认目标会让后续 SetForeground 去激活一个不存在的窗口。
+            $rows = @($rows | Sort-Object -Property @{ Expression = { [int]$_.dialog } },
+                @{ Expression = { [int]$_.hidden } },
+                @{ Expression = { [int](-not $_.active) } },
+                @{ Expression = { [int64]$_.w * [int64]$_.h }; Descending = $true })
             if ($rows.Count -eq 0) {
                 # 进程在、窗口没有：这是「关掉窗口但后台常驻」的状态。
                 # 这时重开浏览器只会多出一个新窗口/新标签，必须阻止。
-                $procs = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match '^(msedge|chrome|brave|vivaldi|opera|chromium|thorium|firefox|librewolf)$' })
+                $procs = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match $script:BrowserProcessRegex })
                 if ($procs.Count -gt 0) {
                     $names = ($procs | Select-Object -ExpandProperty ProcessName -Unique) -join ', '
                     Fail ("$names is running in the background but has no window. Ask the user to restore it from the taskbar (or run: bctl.ps1 wake). Do not launch a new browser: that opens an extra window and a new tab instead of using the session the user already has.")
@@ -387,7 +399,11 @@ Global flags: --json (machine readable output)
 
         'focus' {
             $w = Need-Pid $rest[0]
-            [void](Set-BctlForeground -Window $w)
+            $raised = Set-BctlForeground -Window $w
+            Write-BctlAudit 'focus' @{ pid = $w.pid; raised = $raised }
+            if (-not $raised) {
+                Fail ("could not bring pid=" + $w.pid + " to the front. The window may be hidden, or Windows refused the change. Nothing else was done.")
+            }
             Out-Result ([pscustomobject]@{ ok = $true; pid = $w.pid; title = $w.title })
         }
 
@@ -425,21 +441,38 @@ Global flags: --json (machine readable output)
             $text = $null
             if ($flags['file']) { $text = [System.IO.File]::ReadAllText($flags['file'], [System.Text.Encoding]::UTF8) }
             elseif ($rest.Count -ge 1) { $text = ($rest -join ' ') }
-            if (-not $text) { Fail 'usage: type <text> | type --file <path>' }
-            Invoke-BctlType -Text $text
+            if (-not $text) { Fail 'usage: type <text> --pid <pid|pid:handle>' }
+            # 打字必须有目标：SendInput 是全局的，没有目标就会插进用户当前所在的任意窗口
+            if (-not $flags['pid']) {
+                Fail 'refusing to type without --pid: the text would land in whatever app the user has focused. Pass --pid <pid|pid:handle>.'
+            }
+            $w = Need-Pid $flags['pid']
+            if (-not (Set-BctlForeground -Window $w)) {
+                Fail ("could not bring the target browser window to the front (pid=" + $w.pid + "). Nothing was typed.")
+            }
+            Invoke-BctlType -Text $text -GuardHandle ([int64]$w.handle) -GuardPid ([uint32]$w.pid)
+            Write-BctlAudit 'type' @{ pid = $w.pid; chars = $text.Length }
             Out-Result ([pscustomobject]@{ ok = $true; chars = $text.Length })
         }
 
         'key' {
-            if ($rest.Count -lt 1) { Fail 'usage: key <combo> [--allow-close]' }
+            if ($rest.Count -lt 1) { Fail 'usage: key <combo> --pid <pid|pid:handle> [--allow-close]' }
             $combo = (($rest -join '+').ToUpper()) -replace '\s', ''
             $closeCombos = @('CTRL+W', 'CTRL+F4', 'ALT+F4', 'CTRL+SHIFT+W', 'CTRL+Q')
             if (($closeCombos -contains $combo) -and -not $flags['allow-close']) {
                 Write-BctlAudit 'key-refused' @{ combo = $combo }
                 Fail ("'" + $combo + "' closes a tab or the window, so nothing was sent. Closing the last window leaves the browser running with no UI, which is exactly the vanished-browser state. Pass --allow-close only when ending the window is really the goal.")
             }
-            Invoke-BctlKey -Combo $combo
-            Write-BctlAudit 'key' @{ combo = $combo }
+            # 同上：没有目标窗口就不发键，否则快捷键会落到用户正在用的软件上
+            if (-not $flags['pid']) {
+                Fail 'refusing to send keys without --pid: they would land in whatever app the user has focused. Pass --pid <pid|pid:handle>.'
+            }
+            $w = Need-Pid $flags['pid']
+            if (-not (Set-BctlForeground -Window $w)) {
+                Fail ("could not bring the target browser window to the front (pid=" + $w.pid + "). No keys were sent.")
+            }
+            Invoke-BctlKey -Combo $combo -GuardHandle ([int64]$w.handle) -GuardPid ([uint32]$w.pid)
+            Write-BctlAudit 'key' @{ combo = $combo; pid = $w.pid }
             Out-Result ([pscustomobject]@{ ok = $true; combo = $combo })
         }
 
@@ -543,22 +576,30 @@ Global flags: --json (machine readable output)
             $w = Need-Pid $rest[0]
             $n = [int]$rest[1]
             if ($n -lt 1 -or $n -gt 9) { Fail 'tab index must be 1..9 (use tabs to enumerate)' }
-            [void](Set-BctlForeground -Window $w)
-            Invoke-BctlKey -Combo "CTRL+$n"
+            if (-not (Set-BctlForeground -Window $w)) { Fail ("could not bring the target window to the front (pid=" + $w.pid + "). Nothing was switched.") }
+            Invoke-BctlKey -Combo "CTRL+$n" -GuardHandle ([int64]$w.handle) -GuardPid ([uint32]$w.pid)
             Out-Result ([pscustomobject]@{ ok = $true; tab = $n })
         }
 
         'newtab' {
             $w = Need-Pid $rest[0]
-            [void](Set-BctlForeground -Window $w)
-            Invoke-BctlKey -Combo 'CTRL+T'
+            if (-not (Set-BctlForeground -Window $w)) { Fail ("could not bring the target window to the front (pid=" + $w.pid + "). Nothing was opened.") }
+            Invoke-BctlKey -Combo 'CTRL+T' -GuardHandle ([int64]$w.handle) -GuardPid ([uint32]$w.pid)
+            Write-BctlAudit 'newtab' @{ pid = $w.pid }
             Out-Result ([pscustomobject]@{ ok = $true })
         }
 
         'closetab' {
+            # 这个命令以前直接发 CTRL+W，绕过了 key 分支的关闭拦截，也不写审计。
+            # 现在与 key 同一套门槛：默认拒绝，需要 --allow-close。
+            if (-not $flags['allow-close']) {
+                Write-BctlAudit 'closetab-refused' @{ pid = $rest[0] }
+                Fail 'closetab closes a tab, so nothing was sent. Closing the last tab leaves the browser running with no window. Pass --allow-close only when ending it is really the goal.'
+            }
             $w = Need-Pid $rest[0]
-            [void](Set-BctlForeground -Window $w)
-            Invoke-BctlKey -Combo 'CTRL+W'
+            if (-not (Set-BctlForeground -Window $w)) { Fail ("could not bring the target window to the front (pid=" + $w.pid + "). Nothing was closed.") }
+            Invoke-BctlKey -Combo 'CTRL+W' -GuardHandle ([int64]$w.handle) -GuardPid ([uint32]$w.pid)
+            Write-BctlAudit 'closetab' @{ pid = $w.pid }
             Out-Result ([pscustomobject]@{ ok = $true })
         }
 
@@ -600,9 +641,12 @@ Global flags: --json (machine readable output)
                 $hit = $null
                 if ($label -and $label.Length -ge 2) {
                     foreach ($t in ($tabs | Where-Object { -not $_.selected })) {
+                        # CTRL+n 只到 9。以前对第 10 个标签会拼出 CTRL+10，
+                        # Invoke-BctlKey 直接抛 unknown key，整条 nav 于是失败。
+                        if ($t.index -lt 1 -or $t.index -gt 9) { continue }
                         if ($t.name -notmatch [regex]::Escape($label)) { continue }
-                        [void](Set-BctlForeground -Window $w)
-                        Invoke-BctlKey -Combo ("CTRL+" + $t.index)
+                        if (-not (Set-BctlForeground -Window $w)) { break }
+                        Invoke-BctlKey -Combo ("CTRL+" + $t.index) -GuardHandle ([int64]$w.handle) -GuardPid ([uint32]$w.pid)
                         Start-Sleep -Milliseconds 400
                         $u2 = Get-BctlAddressBarValue -Window $w
                         if ($u2 -and (Normalize-BctlUrl $u2) -eq $target) { $hit = $t; break }
@@ -613,26 +657,37 @@ Global flags: --json (machine readable output)
                     Out-Result ([pscustomobject]@{ ok = $true; reused = $true; reason = 'existing-tab'; tab = $hit.index; title = $hit.name })
                     break
                 }
-                if ($origIndex) {
+                if ($origIndex -and $origIndex -le 9) {
                     [void](Set-BctlForeground -Window $w)
-                    Invoke-BctlKey -Combo ("CTRL+" + $origIndex)
+                    Invoke-BctlKey -Combo ("CTRL+" + $origIndex) -GuardHandle ([int64]$w.handle) -GuardPid ([uint32]$w.pid)
                     Start-Sleep -Milliseconds 300
                 }
             }
 
             $before = Get-BctlWindowState -Handle $w.handle
-            [void](Set-BctlForeground -Window $w)
-            Invoke-BctlKey -Combo 'CTRL+L'
+            # 前台必须切成功。切不过去还继续敲 CTRL+L 和 URL，这些按键就会
+            # 打进用户当前的任意窗口里——这正是「输入跑到别的软件」的成因。
+            if (-not (Set-BctlForeground -Window $w)) {
+                Fail ("could not bring the target browser window to the front (pid=" + $w.pid + "). Nothing was navigated: the address-bar keystrokes would have gone to another app.")
+            }
+            $gh = [int64]$w.handle
+            $gp = [uint32]$w.pid
+            Invoke-BctlKey -Combo 'CTRL+L' -GuardHandle $gh -GuardPid $gp
             Start-Sleep -Milliseconds 150
-            Invoke-BctlKey -Combo 'CTRL+A'
-            Invoke-BctlType -Text $url
+            Invoke-BctlKey -Combo 'CTRL+A' -GuardHandle $gh -GuardPid $gp
+            Invoke-BctlType -Text $url -GuardHandle $gh -GuardPid $gp
             Start-Sleep -Milliseconds 120
-            Invoke-BctlKey -Combo 'ENTER'
+            Invoke-BctlKey -Combo 'ENTER' -GuardHandle $gh -GuardPid $gp
             Start-Sleep -Milliseconds 1200
             $after = Get-BctlWindowState -Handle $w.handle
+            if (-not $after.visible) {
+                # Edge 会重建顶层窗口，句柄失效并不等于浏览器没了。重新解析一次再判。
+                $w2 = Resolve-BctlWindow -Spec ([string]$w.pid)
+                if ($w2) { $after = Get-BctlWindowState -Handle $w2.handle; $w = $w2 }
+            }
             Write-BctlAudit 'nav' @{ pid = $w.pid; url = $url; reused = 'no'; before = $before; after = $after }
             if (-not $after.visible) {
-                Fail 'the browser window disappeared during navigation. Run: bctl.ps1 ensure'
+                Fail 'the browser window disappeared during navigation. Run: bctl.ps1 ensure to see whether the process still has a window.'
             }
             $title = ''
             try { $doc = Get-BctlDocument -ProcessId $w.pid; if ($doc) { $title = $doc.Current.Name } } catch { }
@@ -709,8 +764,14 @@ Global flags: --json (machine readable output)
             }
 
             $info = Get-BctlElementInfo -Element $el
+            if ($info.cx -lt 0 -or $info.cy -lt 0) {
+                Fail ("the element '" + $info.name + "' reports no on-screen coordinates (offscreen), so there is nothing to click.")
+            }
             $before = Get-BctlWindowState -Handle $w.handle
-            [void](Set-BctlForeground -Window $w)
+            # 点击是绝对坐标：窗口不在前台时，落在那个坐标上的是别的窗口
+            if (-not (Set-BctlForeground -Window $w)) {
+                Fail ("could not bring the target browser window to the front (pid=" + $w.pid + "). Nothing was clicked.")
+            }
             Invoke-BctlClick -X $info.cx -Y $info.cy
             $after = Get-BctlWindowState -Handle $w.handle
             Write-BctlAudit 'clickel' @{ pid = $w.pid; name = $info.name; x = $info.cx; y = $info.cy; before = $before; after = $after }
@@ -787,6 +848,11 @@ Global flags: --json (machine readable output)
             if (-not $doc) { Fail 'no Document node found (page still loading?)' }
             $tp = $doc.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
             $txt = $tp.DocumentRange.GetText(-1)
+            $cut = $false
+            if ($txt.Length -gt $script:MaxTextChars) {
+                $txt = $txt.Substring(0, $script:MaxTextChars)
+                $cut = $true
+            }
             if ($isJson) {
                 # 只在显式给了 --file 时落盘，避免每次读取都产生文件
                 $saved = $null
@@ -794,7 +860,7 @@ Global flags: --json (machine readable output)
                     [System.IO.File]::WriteAllText($flags['file'], $txt, (New-Object System.Text.UTF8Encoding($false)))
                     $saved = (Resolve-Path $flags['file']).Path
                 }
-                Out-Result ([pscustomobject]@{ ok = $true; chars = $txt.Length; file = $saved; text = $txt })
+                Out-Result ([pscustomobject]@{ ok = $true; chars = $txt.Length; truncated = $cut; file = $saved; text = $txt })
                 break
             }
             $file = if ($flags['file']) { $flags['file'] } else { Join-Path (Get-Location) 'page.txt' }
@@ -1034,6 +1100,7 @@ function Invoke-BctlBatch {
     $keepGoing = $false
     $echo = $false
     $asJson = $false
+    $port = ''
     $i = 0
     while ($i -lt $ArgList.Count) {
         $a = [string]$ArgList[$i]
@@ -1043,6 +1110,7 @@ function Invoke-BctlBatch {
             # --cmd 可以重复给：Windows 上层层转义 JSON 很容易被吃掉引号，
             # 直接一条 --cmd 一步最稳，不需要任何 JSON 语法。
             '^--cmd$' { if ($i + 1 -lt $ArgList.Count) { $null = $cmds.Add([string]$ArgList[$i + 1]); $i++ } }
+            '^--port$' { if ($i + 1 -lt $ArgList.Count) { $port = [string]$ArgList[$i + 1]; $i++ } }
             '^--keep-going$' { $keepGoing = $true }
             '^--echo$' { $echo = $true }
             '^--json$' { $asJson = $true }
@@ -1090,6 +1158,9 @@ function Invoke-BctlBatch {
         $n++
         $argv = @(Split-BctlLine $trim)
         if ($argv -notcontains '--json') { $argv += '--json' }
+        # 外层 --port 要落到每一步上，否则 steps 里的 js 会退回默认 8737，
+        # 而插件配置改过端口时就整个跑不通。
+        if ($port -and ($argv -notcontains '--port')) { $argv += '--port'; $argv += $port }
         if ($echo) { Write-Host ("[{0}] {1}" -f $n, $trim) }
         $sw = [Diagnostics.Stopwatch]::StartNew()
         try {
