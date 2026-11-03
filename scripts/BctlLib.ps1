@@ -1,8 +1,10 @@
-﻿# BctlLib.ps1 - core library for dsh-browser-bridge
+﻿# server.ps1 requires the X-DSH-Bridge header on every path except /install.user.js, so health probes must send it too.
+$script:Hdr = @{ 'X-DSH-Bridge' = '1' }
+# BctlLib.ps1 - core library for dsh-browser-bridge
 # Pure PowerShell 5.1 + .NET Framework. No external dependency.
 # Dot-source this file, then call the exported functions.
 
-$script:BctlVersion = '1.5.0'
+$script:BctlVersion = '1.5.1'
 
 # 浏览器进程与窗口类白名单：全项目只此一份，bctl.ps1 直接复用。
 # 之前 index.js / BctlLib / bctl 各写一遍，加一个浏览器要改三处，必然漂移。
@@ -672,10 +674,10 @@ function Get-BctlBridgeHealth {
     param([int]$Port = 8737, [int]$StaleSec = 5)
     $base = "http://127.0.0.1:$Port"
     $ping = $null
-    try { $ping = Invoke-RestMethod -Uri "$base/ping" -TimeoutSec 2 } catch { }
+    try { $ping = Invoke-RestMethod -Uri "$base/ping" -Headers $script:Hdr -TimeoutSec 2 } catch { }
     if (-not $ping) { return [pscustomobject]@{ running = $false; client = $false; port = $Port } }
     $stats = $null
-    try { $stats = Invoke-RestMethod -Uri "$base/stats" -TimeoutSec 2 } catch { }
+    try { $stats = Invoke-RestMethod -Uri "$base/stats" -Headers $script:Hdr -TimeoutSec 2 } catch { }
     $client = $false
     $age = $null
     if ($stats -and $stats.lastPollUtc) {

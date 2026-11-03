@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         dsh-browser-bridge
 // @namespace    https://github.com/xkzm123/dsh-browser-bridge
-// @version      1.5.0
+// @version      1.5.1
 // @description  Lets a DeepSeek Harness session read and drive an already-running browser, without restarting it or enabling remote debugging.
 // @author       xkzm123
 // @match        *://*/*
@@ -364,7 +364,7 @@
 
     window.__DSH_BRIDGE__ = {
         port: PORT,
-        version: '1.5.0',
+        version: '1.5.1',
         eval: evalOk,
         ops: Object.keys(OPS),
         ping: () => get('/ping'),

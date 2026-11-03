@@ -938,7 +938,7 @@ Global flags: --json (machine readable output)
             switch ($sub) {
                 'start' {
                     $ping = $null
-                    try { $ping = Invoke-RestMethod -Uri "$base/ping" -TimeoutSec 2 } catch { }
+                    try { $ping = Invoke-RestMethod -Uri "$base/ping" -Headers $script:Hdr -TimeoutSec 2 } catch { }
                     if ($ping) { Out-Result ([pscustomobject]@{ ok = $true; already = $true; port = $port }); break }
                     $server = Join-Path (Split-Path -Parent $PSScriptRoot) 'bridge\server.ps1'
                     if (-not (Test-Path $server)) { Fail "server.ps1 not found at $server" }
@@ -947,7 +947,7 @@ Global flags: --json (machine readable output)
                     $ok = $false
                     for ($k = 0; $k -lt 25; $k++) {
                         Start-Sleep -Milliseconds 200
-                        try { $null = Invoke-RestMethod -Uri "$base/ping" -TimeoutSec 1; $ok = $true; break } catch { }
+                        try { $null = Invoke-RestMethod -Uri "$base/ping" -Headers $script:Hdr -TimeoutSec 1; $ok = $true; break } catch { }
                     }
                     if (-not $ok) { Fail "server did not come up on port $port" }
                     Out-Result ([pscustomobject]@{ ok = $true; port = $port; url = $base })
@@ -956,7 +956,7 @@ Global flags: --json (machine readable output)
                     # 一条命令串完「起服务 + 打开用户脚本安装页」。脚本没装时，
                     # 上层只能干等到超时——先把装的位置递到眼前再说别的。
                     $running = $false
-                    try { $null = Invoke-RestMethod -Uri "$base/ping" -TimeoutSec 2; $running = $true } catch { }
+                    try { $null = Invoke-RestMethod -Uri "$base/ping" -Headers $script:Hdr -TimeoutSec 2; $running = $true } catch { }
                     if (-not $running) {
                         $server = Join-Path (Split-Path -Parent $PSScriptRoot) 'bridge\server.ps1'
                         if (-not (Test-Path $server)) { Fail "server.ps1 not found at $server" }
@@ -964,7 +964,7 @@ Global flags: --json (machine readable output)
                         Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList $argLine | Out-Null
                         for ($k = 0; $k -lt 25; $k++) {
                             Start-Sleep -Milliseconds 200
-                            try { $null = Invoke-RestMethod -Uri "$base/ping" -TimeoutSec 1; $running = $true; break } catch { }
+                            try { $null = Invoke-RestMethod -Uri "$base/ping" -Headers $script:Hdr -TimeoutSec 1; $running = $true; break } catch { }
                         }
                         if (-not $running) { Fail "server did not come up on port $port" }
                     }
@@ -976,10 +976,10 @@ Global flags: --json (machine readable output)
                         })
                 }
                 'status' {
-                    try { $p = Invoke-RestMethod -Uri "$base/ping" -TimeoutSec 2 } catch { $p = $null }
+                    try { $p = Invoke-RestMethod -Uri "$base/ping" -Headers $script:Hdr -TimeoutSec 2 } catch { $p = $null }
                     if (-not $p) { Out-Result ([pscustomobject]@{ running = $false; port = $port }); break }
                     $s = $null
-                    try { $s = Invoke-RestMethod -Uri "$base/stats" -TimeoutSec 2 } catch { }
+                    try { $s = Invoke-RestMethod -Uri "$base/stats" -Headers $script:Hdr -TimeoutSec 2 } catch { }
                     Out-Result ([pscustomobject]@{ running = $true; port = $port; stats = $s })
                 }
                 'stop' {
@@ -1021,7 +1021,7 @@ Global flags: --json (machine readable output)
             $payload = $payloadObj | ConvertTo-Json -Compress -Depth 6
             $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
             try {
-                $resp = Invoke-RestMethod -Uri "$base/cmd" -Method Post -Body $bytes -ContentType 'application/json; charset=utf-8' -TimeoutSec 5
+                $resp = Invoke-RestMethod -Uri "$base/cmd" -Method Post -Body $bytes -ContentType 'application/json; charset=utf-8' -Headers $script:Hdr -TimeoutSec 5
             }
             catch { Fail "enqueue failed: $($_.Exception.Message)" }
             $id = $resp.id
@@ -1030,7 +1030,7 @@ Global flags: --json (machine readable output)
             $result = $null
             while ((Get-Date) -lt $deadline) {
                 Start-Sleep -Milliseconds 250
-                try { $r = Invoke-RestMethod -Uri "$base/result?id=$id" -TimeoutSec 3 } catch { continue }
+                try { $r = Invoke-RestMethod -Uri "$base/result?id=$id" -Headers $script:Hdr -TimeoutSec 3 } catch { continue }
                 if ($r.status -eq 'done') { $result = $r; break }
             }
             if (-not $result) {

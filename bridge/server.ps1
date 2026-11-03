@@ -1,4 +1,4 @@
-﻿# server.ps1 - localhost command bridge for dsh-browser-bridge (v1.5.0)
+﻿# server.ps1 - localhost command bridge for dsh-browser-bridge (v1.5.1)
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File server.ps1 -Port 8737
 #
@@ -31,28 +31,32 @@ function Write-Json($obj) { $obj | ConvertTo-Json -Depth 6 -Compress }
 
 function Read-HttpRequest {
     param([System.Net.Sockets.NetworkStream]$Stream)
+    # Read at BYTE level. The old version compared $body.Length (characters)
+    # against Content-Length (bytes), so any UTF-8 body (Chinese titles, page
+    # text) never satisfied the loop: every such POST stalled until
+    # ReceiveTimeout and blocked the whole single-threaded accept loop, which
+    # is why results with Chinese text never came back.
+    $all = New-Object System.Collections.Generic.List[byte]
     $buf = New-Object byte[] 8192
-    $sb = New-Object System.Text.StringBuilder
     $headerEnd = -1
-    $total = 0
-    while ($headerEnd -lt 0 -and $total -lt 65536) {
+    while ($headerEnd -lt 0 -and $all.Count -lt 131072) {
         $n = $Stream.Read($buf, 0, $buf.Length)
         if ($n -le 0) { break }
-        $total += $n
-        [void]$sb.Append([System.Text.Encoding]::UTF8.GetString($buf, 0, $n))
-        $headerEnd = $sb.ToString().IndexOf("`r`n`r`n")
+        for ($i = 0; $i -lt $n; $i++) { $all.Add($buf[$i]) }
+        $c = $all.Count
+        $from = [Math]::Max(0, $c - $n - 3)
+        for ($i = $from; $i -le ($c - 4); $i++) {
+            if ($all[$i] -eq 13 -and $all[$i + 1] -eq 10 -and $all[$i + 2] -eq 13 -and $all[$i + 3] -eq 10) { $headerEnd = $i; break }
+        }
     }
-    $raw = $sb.ToString()
-    if ($raw.Length -eq 0) { return $null }
+    if ($all.Count -eq 0) { return $null }
+    if ($headerEnd -lt 0) { return $null }
 
-    $split = $raw.IndexOf("`r`n`r`n")
-    $head = if ($split -ge 0) { $raw.Substring(0, $split) } else { $raw }
-    $body = if ($split -ge 0) { $raw.Substring($split + 4) } else { '' }
-
-    $lines = $head -split "`r`n"
+    $headText = [System.Text.Encoding]::UTF8.GetString($all.GetRange(0, $headerEnd).ToArray())
+    $lines = $headText -split "`r`n"
     $requestLine = $lines[0] -split ' '
     $method = $requestLine[0]
-    $path = $requestLine[1]
+    $path = if ($requestLine.Count -gt 1) { $requestLine[1] } else { '/' }
 
     $headers = @{}
     for ($i = 1; $i -lt $lines.Count; $i++) {
@@ -62,11 +66,17 @@ function Read-HttpRequest {
 
     $len = 0
     if ($headers.ContainsKey('content-length')) { [int]::TryParse($headers['content-length'], [ref]$len) | Out-Null }
-    while ($body.Length -lt $len) {
+
+    $bodyStart = $headerEnd + 4
+    while (($all.Count - $bodyStart) -lt $len) {
         $n = $Stream.Read($buf, 0, $buf.Length)
         if ($n -le 0) { break }
-        $body += [System.Text.Encoding]::UTF8.GetString($buf, 0, $n)
+        for ($i = 0; $i -lt $n; $i++) { $all.Add($buf[$i]) }
     }
+    $avail = $all.Count - $bodyStart
+    $take = [Math]::Min($len, [Math]::Max(0, $avail))
+    $bodyBytes = if ($take -gt 0) { $all.GetRange($bodyStart, $take).ToArray() } else { (New-Object byte[] 0) }
+    if ($null -ne $bodyBytes -and $bodyBytes.Length -gt 0) { $body = [System.Text.Encoding]::UTF8.GetString($bodyBytes) } else { $body = '' }
 
     return @{ method = $method; path = $path; headers = $headers; body = $body }
 }
