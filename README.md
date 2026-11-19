@@ -293,7 +293,7 @@ bctl.ps1 ensure
 
 工具要动「哪个窗口」不再写死，由配置项 `targetMode` 决定。
 
-**设置 → 插件 → dsh-browser-bridge → 配置 → 目标浏览器**，三个按钮，点一下立即生效（写回 profile 的 `cordis.patch.yml` 并热重载插件，不用重启 DSH）。
+**设置 → 浏览器桥**，三个按钮，点一下立即生效（写回 profile 的 `cordis.patch.yml` 并热重载插件，不用重启 DSH）。同一个开关也挂在 **设置 → 插件 → dsh-browser-bridge → 配置** 上，两边写的是同一个字段。
 
 | 选项 | `targetMode` | 会碰的窗口 | 会启动浏览器吗 | 默认 |
 |---|---|---|---|---|

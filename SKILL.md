@@ -61,7 +61,7 @@ description: 操控用户已经打开、正在运行的 Edge/Chrome/Firefox（�
 | `new` | | 只有插件自己起的那个隔离实例（独立 `--user-data-dir`） | 没有就启动；启动失败就报错，绝不退回用户窗口 |
 | `auto` | | 优先托管实例，其次用户窗口 | 先尝试启动，起不来才退回 |
 
-设置入口：**设置 → 插件 → dsh-browser-bridge → 配置 → 目标浏览器**。等价做法是改 profile 的 `cordis.patch.yml` 里那一行的 `targetMode`（`existing` / `new` / `auto`），保存即热重载。
+设置入口：**设置 → 浏览器桥**（同一个开关也在 设置 → 插件 → dsh-browser-bridge → 配置 里）。等价做法是改 profile 的 `cordis.patch.yml` 里那一行的 `targetMode`（`existing` / `new` / `auto`），保存即热重载。
 
 - `existing` 下「浏览器不见了」= 关掉最后一个窗口后进程常驻：让用户从任务栏恢复，或 `bctl.ps1 wake`。**绝对不要执行 `msedge.exe` / `chrome.exe`**——那会多开一个窗口和一个标签，破坏用户现场。
 - `new` / `auto` 下启动托管实例是**工具自己的事**（`bctl.ps1 launch`）。不要手工去起浏览器，报错里带的原因原样转述给用户。

@@ -4,7 +4,7 @@ $script:Hdr = @{ 'X-DSH-Bridge' = '1' }
 # Pure PowerShell 5.1 + .NET Framework. No external dependency.
 # Dot-source this file, then call the exported functions.
 
-$script:BctlVersion = '1.6.0'
+$script:BctlVersion = '1.6.1'
 
 # 浏览器进程与窗口类白名单：全项目只此一份，bctl.ps1 直接复用。
 # 之前 index.js / BctlLib / bctl 各写一遍，加一个浏览器要改三处，必然漂移。
