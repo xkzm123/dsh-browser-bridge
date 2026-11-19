@@ -4,7 +4,7 @@ $script:Hdr = @{ 'X-DSH-Bridge' = '1' }
 # Pure PowerShell 5.1 + .NET Framework. No external dependency.
 # Dot-source this file, then call the exported functions.
 
-$script:BctlVersion = '1.5.1'
+$script:BctlVersion = '1.6.0'
 
 # 浏览器进程与窗口类白名单：全项目只此一份，bctl.ps1 直接复用。
 # 之前 index.js / BctlLib / bctl 各写一遍，加一个浏览器要改三处，必然漂移。
@@ -696,4 +696,241 @@ function Get-BctlBridgeHealth {
         pending     = $ping.pending
         stats       = $stats
     }
+}
+
+# ---------------------------------------------------------------- managed instance
+# 托管实例 = 插件自己起、自己关的那一个浏览器。
+#
+# 为什么要独立的 --user-data-dir：Chromium 按 user-data-dir 区分「同一个浏览器」，
+# 换了目录就一定另起一个浏览器进程。于是「这个窗口归谁」永远可判定，
+# 用户现场（他打开的那个窗口、他的登录态）一点不碰。
+#
+# 识别不靠 pid 单打独斗：pid 会被复用，state.json 也可能过期，
+# 命令行里的 --user-data-dir 才是唯一不会说谎的标识。
+
+$script:ManagedRoot = Join-Path (Join-Path $env:USERPROFILE '.dsh\browser-bridge') 'managed'
+$script:ManagedStateFile = Join-Path $script:ManagedRoot 'state.json'
+$script:DefaultManagedProfile = Join-Path $script:ManagedRoot 'profile'
+$script:ManagedLaunchNames = @('msedge', 'chrome', 'brave', 'vivaldi', 'chromium', 'thorium')
+
+function Get-BctlManagedState {
+    if (-not (Test-Path $script:ManagedStateFile)) { return $null }
+    try {
+        return (Get-Content -Raw -Path $script:ManagedStateFile -Encoding UTF8 | ConvertFrom-Json)
+    }
+    catch { return $null }
+}
+
+function Save-BctlManagedState {
+    param($State)
+    try {
+        if (-not (Test-Path $script:ManagedRoot)) {
+            New-Item -ItemType Directory -Path $script:ManagedRoot -Force | Out-Null
+        }
+        ($State | ConvertTo-Json -Depth 5) | Set-Content -Path $script:ManagedStateFile -Encoding UTF8
+    }
+    catch { }
+}
+
+function Clear-BctlManagedState {
+    try { if (Test-Path $script:ManagedStateFile) { Remove-Item -Path $script:ManagedStateFile -Force } } catch { }
+}
+
+function Get-BctlManagedProfileDir {
+    param([string]$Override)
+    if ($Override) { return $Override }
+    $state = Get-BctlManagedState
+    if ($state -and $state.profileDir) { return [string]$state.profileDir }
+    return $script:DefaultManagedProfile
+}
+
+function Get-BctlManagedPids {
+    # -Reconcile 才会去查命令行（CIM 查询约 100-300ms），热路径上只用 state 里的 pid。
+    param([string]$ProfileDir, [switch]$Reconcile)
+    $dir = Get-BctlManagedProfileDir -Override $ProfileDir
+    $pids = New-Object System.Collections.Generic.List[int]
+    $state = Get-BctlManagedState
+    if ($state -and $state.pid) {
+        $p = Get-Process -Id ([int]$state.pid) -ErrorAction SilentlyContinue
+        if ($p -and ($script:BrowserProcessNames -contains $p.ProcessName.ToLower())) {
+            if (-not $pids.Contains([int]$state.pid)) { $pids.Add([int]$state.pid) }
+        }
+    }
+    if ($Reconcile) {
+        $needle = '--user-data-dir=' + $dir
+        $filter = ($script:ManagedLaunchNames | ForEach-Object { "Name='$_.exe'" }) -join ' OR '
+        $procs = @()
+        try { $procs = @(Get-CimInstance Win32_Process -Filter $filter -ErrorAction Stop) } catch { $procs = @() }
+        foreach ($proc in $procs) {
+            $cmd = [string]$proc.CommandLine
+            if (-not $cmd) { continue }
+            # 子进程（renderer/gpu）会继承参数，但它们不是「那个窗口」的主人
+            if ($cmd -match '--type=') { continue }
+            if ($cmd.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+            if (-not $pids.Contains([int]$proc.ProcessId)) { $pids.Add([int]$proc.ProcessId) }
+        }
+    }
+    return $pids
+}
+
+function Get-BctlManagedWindows {
+    param([string]$ProfileDir)
+    # @() 不能省：PowerShell 会把「只有一个元素的集合」拆成标量返回，
+    # 于是 $pids.Contains() 会变成 [int].Contains() 直接炸。
+    $pids = @(Get-BctlManagedPids -ProfileDir $ProfileDir)
+    if ($pids.Count -eq 0) { return @() }
+    $fg = [BctlNative]::GetForegroundWindow()
+    $rows = @()
+    foreach ($w in (Get-BctlWindows -IncludeHidden)) {
+        if ($pids -notcontains [int]$w.pid) { continue }
+        if ($w.w -lt 300 -or $w.h -lt 200) { continue }
+        $p = Get-Process -Id $w.pid -ErrorAction SilentlyContinue
+        if (-not $p) { continue }
+        $owner = [BctlNative]::GetWindow([IntPtr]$w.handle, 4)
+        $rows += [pscustomobject]@{
+            pid     = $w.pid
+            handle  = $w.handle
+            process = $p.ProcessName
+            active  = ([int64]$fg -eq [int64]$w.handle)
+            hidden  = (-not $w.visible)
+            dialog  = ($owner -ne [IntPtr]::Zero)
+            w       = $w.w
+            h       = $w.h
+            title   = $w.title
+            managed = $true
+        }
+    }
+    return @($rows | Sort-Object -Property @{ Expression = { [int]$_.dialog } },
+        @{ Expression = { [int]$_.hidden } },
+        @{ Expression = { [int](-not $_.active) } },
+        @{ Expression = { [int64]$_.w * [int64]$_.h }; Descending = $true })
+}
+
+function Get-BctlBrowserExe {
+    # 顺序固定：偏好项 → Edge → Chrome → 其它 Chromium 系。
+    # Firefox 的托管启动参数完全不同（-profile/-no-remote），这一版不装样子支持。
+    param([string]$Prefer = 'auto')
+    $order = @()
+    $preferName = ([string]$Prefer).ToLower()
+    if ($preferName -and $preferName -ne 'auto') { $order += $preferName }
+    foreach ($n in @('msedge', 'chrome', 'brave', 'vivaldi', 'chromium', 'thorium')) {
+        if ($order -notcontains $n) { $order += $n }
+    }
+    $map = @{
+        msedge   = @('%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe', '%ProgramFiles%\Microsoft\Edge\Application\msedge.exe')
+        chrome   = @('%ProgramFiles%\Google\Chrome\Application\chrome.exe', '%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe', '%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe')
+        brave    = @('%ProgramFiles%\BraveSoftware\Brave-Browser\Application\brave.exe', '%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe')
+        vivaldi  = @('%LOCALAPPDATA%\Vivaldi\Application\vivaldi.exe', '%ProgramFiles%\Vivaldi\Application\vivaldi.exe')
+        chromium = @('%LOCALAPPDATA%\Chromium\Application\chrome.exe', '%ProgramFiles%\Chromium\Application\chrome.exe')
+        thorium  = @('%LOCALAPPDATA%\Thorium\Application\thorium.exe', '%ProgramFiles%\Thorium\Application\thorium.exe')
+    }
+    foreach ($name in $order) {
+        foreach ($raw in ($map[$name])) {
+            if (-not $raw) { continue }
+            $path = [System.Environment]::ExpandEnvironmentVariables($raw)
+            if ($path -and (Test-Path -LiteralPath $path)) {
+                return [pscustomobject]@{ path = $path; name = $name }
+            }
+        }
+        foreach ($hive in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths',
+                'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths',
+                'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths')) {
+            $key = Join-Path $hive ($name + '.exe')
+            try {
+                $entry = Get-ItemProperty -Path $key -ErrorAction Stop
+                $path = [string]$entry.'(default)'
+                if ($path) { $path = $path.Trim('"') }
+                if ($path -and (Test-Path -LiteralPath $path)) {
+                    return [pscustomobject]@{ path = $path; name = $name }
+                }
+            }
+            catch { }
+        }
+    }
+    return $null
+}
+
+function Start-BctlManagedBrowser {
+    # 起一个托管实例并等它的窗口出现。返回结构化结果，不抛异常：
+    # 「起不来」在上层是一条要原样转述给用户的错误，而不是要吞掉的崩溃。
+    param([string]$Browser = 'auto', [string]$ProfileDir, [int]$WaitSec = 15)
+    $dir = Get-BctlManagedProfileDir -Override $ProfileDir
+    try {
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    }
+    catch {
+        return [pscustomobject]@{ ok = $false; error = "cannot create the managed profile directory: $dir ($($_.Exception.Message))" }
+    }
+    $exe = Get-BctlBrowserExe -Prefer $Browser
+    if (-not $exe) {
+        return [pscustomobject]@{
+            ok    = $false
+            error = "no Chromium-family browser was found (looked for msedge, chrome, brave, vivaldi, chromium, thorium). Install one, or set targetMode=existing to drive the browser the user already has open."
+        }
+    }
+    $argLine = '--user-data-dir="' + $dir + '" --no-first-run --no-default-browser-check --disable-features=msEdgeSidebarV2 about:blank'
+    $proc = $null
+    try {
+        $proc = Start-Process -FilePath $exe.path -ArgumentList $argLine -PassThru
+    }
+    catch {
+        return [pscustomobject]@{ ok = $false; error = "failed to start $($exe.path): $($_.Exception.Message)" }
+    }
+    Save-BctlManagedState ([pscustomobject]@{
+            pid        = $proc.Id
+            exe        = $exe.path
+            browser    = $exe.name
+            profileDir = $dir
+            launchedAt = (Get-Date).ToString('o')
+        })
+
+    $deadline = (Get-Date).AddSeconds([math]::Max(3, $WaitSec))
+    while ((Get-Date) -lt $deadline) {
+        $rows = @(Get-BctlManagedWindows -ProfileDir $dir)
+        if ($rows.Count -gt 0) {
+            $t = $rows[0]
+            return [pscustomobject]@{
+                ok         = $true
+                created    = $true
+                pid        = $t.pid
+                handle     = $t.handle
+                title      = $t.title
+                browser    = $exe.name
+                exe        = $exe.path
+                profileDir = $dir
+            }
+        }
+        if ($proc.HasExited) {
+            Clear-BctlManagedState
+            return [pscustomobject]@{
+                ok    = $false
+                error = "the managed browser exited immediately (exit code $($proc.ExitCode)) — another instance may already be using the profile directory $dir"
+            }
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    return [pscustomobject]@{
+        ok         = $false
+        error      = "the managed browser started (pid $($proc.Id)) but opened no window within $WaitSec s. It may still be starting; retry once, or close it with: bctl.ps1 close-managed"
+        pid        = $proc.Id
+        profileDir = $dir
+    }
+}
+
+function Stop-BctlManagedBrowser {
+    # 只关自己那份 profile 的进程。命令行匹配是唯一的硬边界：
+    # 绝不按进程名批量杀浏览器，那会顺手关掉用户正在用的窗口。
+    param([string]$ProfileDir)
+    $dir = Get-BctlManagedProfileDir -Override $ProfileDir
+    $pids = @(Get-BctlManagedPids -ProfileDir $dir -Reconcile)
+    $stopped = @()
+    foreach ($procId in $pids) {
+        try {
+            Stop-Process -Id $procId -Force -ErrorAction Stop
+            $stopped += $procId
+        }
+        catch { }
+    }
+    if ($stopped.Count -gt 0) { Clear-BctlManagedState }
+    return [pscustomobject]@{ ok = $true; stopped = $stopped; profileDir = $dir }
 }

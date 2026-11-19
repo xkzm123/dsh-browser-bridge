@@ -23,6 +23,7 @@
 - [要不要装油猴脚本](#要不要装油猴脚本)
 - [油猴脚本怎么装](#油猴脚本怎么装)
 - [它怎么省钱](#它怎么省钱)
+- [目标浏览器：三档开关](#目标浏览器三档开关)
 - [它是怎么做到的](#它是怎么做到的)
 - [22 个工具](#22-个工具)
 - [常见问题](#常见问题)
@@ -274,7 +275,7 @@ C:\Users\你\.dsh\profiles\web\node_modules\dsh-browser-bridge\scripts\bctl.ps1 
 |---|---|
 | **不会关闭你的浏览器或标签页** | `CTRL+W`、`CTRL+F4`、`ALT+F4` 直接拒绝执行（要关得显式加 `allowClose`）。关掉最后一扇窗会让浏览器变成「进程在、窗口没、任务栏没图标、声音还在放」的状态——看起来就是浏览器消失了 |
 | **不会点浏览器自己的按钮** | 所有点击只搜网页内容（无障碍树的 `Document` 子树）。标题栏的「最小化/还原/关闭」不在搜索范围里，甚至在快照里都不会出现 |
-| **不会启动浏览器** | 找不到窗口就报错让你去开；它从不执行 `msedge.exe` / `chrome.exe`。重开一个只会多一个窗口和一个新标签 |
+| **不会启动浏览器**（`targetMode=existing` 时） | 找不到窗口就报错让你去开；它从不执行 `msedge.exe` / `chrome.exe`。重开一个只会多一个窗口和一个新标签。需要「新浏览器」时改用 `targetMode=new/auto`，它起的是自己那份独立配置目录的实例，不是在你现有会话上再开一扇窗 |
 
 浏览器真的没了的时候，`bctl.ps1 ensure` 会告诉你是哪种状态：
 
@@ -287,6 +288,50 @@ bctl.ps1 ensure
 ```
 
 每一步动作都记在 `~\.dshrowser-bridgeudit.log`，出问题用 `bctl.ps1 audit tail 20` 就能看到是哪一步之后窗口没的。
+
+## 目标浏览器：三档开关
+
+工具要动「哪个窗口」不再写死，由配置项 `targetMode` 决定。
+
+**设置 → 插件 → dsh-browser-bridge → 配置 → 目标浏览器**，三个按钮，点一下立即生效（写回 profile 的 `cordis.patch.yml` 并热重载插件，不用重启 DSH）。
+
+| 选项 | `targetMode` | 会碰的窗口 | 会启动浏览器吗 | 默认 |
+|---|---|---|---|---|
+| 仅已打开的浏览器 | `existing` | 只有你自己打开的那些 | 从不 | ✅ |
+| 仅新浏览器 | `new` | 只有插件自己起的那个隔离实例 | 没有就启动；起不来就报错，**绝不**退回你的窗口 | |
+| 自动（优先新浏览器） | `auto` | 优先托管实例，其次你的窗口 | 先尝试启动，失败才退回 | |
+
+等价的手工改法（不想开界面就直接编辑 profile）：
+
+```yaml
+- insert:
+    - id: dsh-browser-bridge
+      name: dsh-browser-bridge
+      config:
+        targetMode: auto          # existing | new | auto
+        managedBrowser: auto      # auto | msedge | chrome | brave | vivaldi | chromium | thorium
+        managedProfileDir: ''     # 空 = %USERPROFILE%\.dsh\browser-bridge\managed\profile
+```
+
+**「新浏览器」到底是什么。** 它不是在你的会话上再开一扇窗，而是用独立 `--user-data-dir`
+起一个**完全隔离**的浏览器实例：没有你的登录态、没有你的扩展、没有你的书签。好处是
+「这个窗口归谁」永远可判定，插件也不会碰你正在用的那个窗口。
+
+```powershell
+bctl.ps1 launch            # 起（或复用）托管实例，等到窗口出现为止
+bctl.ps1 managed           # 只列托管实例，空表 = 还没起
+bctl.ps1 browsers --managed-only
+bctl.ps1 close-managed     # 只关托管实例；按命令行里的 --user-data-dir 认进程，绝不按进程名批量杀
+```
+
+几个必须知道的点：
+
+- 托管实例是全新 profile，**没有登录态**。要它登你的账号，得在那个窗口里登一次（登录态会留在那个 profile 里）。
+- 要用 JS 桥（`browser_run_js` / `browser_page_query`），得在**那个窗口**里装一次 userscript：`bctl.ps1 bridge install`。桥是「哪个标签页先来领任务就给谁」，所以托管模式下工具会先把托管窗口切到前台再发页面级任务。
+- `new` 模式下显式传一个你自己窗口的 pid 会被拒绝，这是策略不是 bug；`existing` 模式反过来也拒绝托管实例的 pid。
+- 切换开关会重挂插件：正在跑的浏览器调用会断，长任务中途别切。
+
+---
 
 ## 它是怎么做到的
 

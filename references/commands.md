@@ -40,9 +40,12 @@ browsers    : {@{pid=13008; process=msedge; uiaVisible=True; title=...; rect=192
 ### `windows [--all]`
 顶层窗口列表。默认过滤掉小于 200x100 的窗口。
 
-### `browsers`
+### `browsers [--managed-only] [--profile <dir>]`
 只列**真正的浏览器窗口**（`Chrome_WidgetWin_1` / `MozillaWindowClass` + 进程白名单），
-宿主自己的 Electron 窗口不会出现。字段：`pid handle process active hidden w h title`。
+宿主自己的 Electron 窗口不会出现。字段：`pid handle process active hidden dialog w h title managed`。
+
+`managed: true` 表示这是插件自己 `launch` 起来的托管实例（识别依据：`state.json` 里的 pid，
+命令行里带本插件的 `--user-data-dir`）。`--managed-only` 只回托管实例，**空表是正常状态**，不是错误。
 
 `hidden: true` 表示进程在、窗口被隐藏（关掉最后一个窗口后的后台常驻状态）。
 
@@ -53,6 +56,22 @@ ERR: msedge is running in the background but has no window.
      Ask the user to restore it from the taskbar (or run: bctl.ps1 wake).
      Do not launch a new browser: ...
 ```
+
+### `managed [--profile <dir>]`
+只列托管实例的窗口，字段与 `browsers` 相同。空表 = 还没起。
+
+### `launch [--browser auto|msedge|chrome|...] [--profile <dir>] [--recycle]`
+起（或复用）托管实例，等到窗口出现为止（默认最多 15s）。返回
+`{ok, created, pid, handle, title, browser, exe, profileDir}`；失败返回 `{ok:false, error}`。
+
+- 已经有一个带窗口的托管实例 → 直接复用，`created:false`
+- `--recycle` 先关掉现有托管实例再起
+- 起不来（没装 Chromium 系浏览器 / 进程秒退 / 15s 没窗口）→ `ok:false`，原因在 `error` 里
+- 托管实例的配置目录默认 `%USERPROFILE%\.dsh\browser-bridge\managed\profile`，与用户自己的 profile 完全隔离
+
+### `close-managed [--profile <dir>]`
+关掉托管实例。只杀命令行里带本插件 `--user-data-dir` 的进程（跳过 `--type=` 子进程），
+**绝不按进程名批量杀浏览器**。
 
 ### `wake`
 把后台常驻、窗口被隐藏的浏览器**重新显示出来**。

@@ -225,7 +225,11 @@ try {
 dsh-browser-bridge / bctl  -  drive an already-running browser, no restart
 
   doctor                              environment + capability self-check
-  browsers                            list running browser processes
+  browsers [--managed-only]           list browser windows; managed = the instance this tool launched
+  managed                             list only the managed instance's windows (empty list when none)
+  launch [--browser msedge|chrome|auto] [--profile <dir>] [--recycle]
+                                      start (or reuse) the managed instance and wait for its window
+  close-managed                       close ONLY the managed instance (never the user's windows)
   windows [--all]                     list top-level windows
   active                              print the foreground window
   focus <pid|title>                   bring window to front
@@ -316,6 +320,10 @@ Global flags: --json (machine readable output)
         'browsers' {
             # 只列真正的浏览器窗口：主机自己的 Electron / WebView 窗口一律不出现，
             # 上层工具因此不可能误操作宿主窗口。
+            # managed 标记回答的是「这个窗口是不是插件自己起的那个实例」，
+            # 上层靠它实现 targetMode 的三档策略。
+            $managedOnly = [bool]$flags['managed-only']
+            $managedPids = @(Get-BctlManagedPids -ProfileDir ([string]$flags['profile']))
             $fg = [BctlNative]::GetForegroundWindow()
             $rows = @()
             $seen = @{}
@@ -326,6 +334,8 @@ Global flags: --json (machine readable output)
                 if ($w.w -lt 300 -or $w.h -lt 200) { continue }
                 if ($seen.ContainsKey([string]$w.handle)) { continue }
                 $seen[[string]$w.handle] = $true
+                $isManaged = $managedPids -contains [int]$w.pid
+                if ($managedOnly -and -not $isManaged) { continue }
                 # 有 owner 的是弹窗/浮层（翻译条、书签弹窗等），不能当成主窗口
                 $owner = [BctlNative]::GetWindow([IntPtr]$w.handle, 4)
                 $rows += [pscustomobject]@{
@@ -338,6 +348,7 @@ Global flags: --json (machine readable output)
                     w       = $w.w
                     h       = $w.h
                     title   = $w.title
+                    managed = $isManaged
                 }
             }
             # 主窗口排前面：非弹窗 → 可见 → 前台 → 面积大。
@@ -348,6 +359,10 @@ Global flags: --json (machine readable output)
                 @{ Expression = { [int](-not $_.active) } },
                 @{ Expression = { [int64]$_.w * [int64]$_.h }; Descending = $true })
             if ($rows.Count -eq 0) {
+                # --managed-only 问的是「托管实例在不在」，不在就是空表，不是错误。
+                # 注意这里必须是裸 Out-List：Out-List @() 会把「一个空数组」当成一行，
+                # 输出变成 [[]]，上层按行解析就多出一条空记录。
+                if ($managedOnly) { Out-List; break }
                 # 进程在、窗口没有：这是「关掉窗口但后台常驻」的状态。
                 # 这时重开浏览器只会多出一个新窗口/新标签，必须阻止。
                 $procs = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match $script:BrowserProcessRegex })
@@ -358,6 +373,48 @@ Global flags: --json (machine readable output)
                 Fail 'no browser is running. Ask the user to open Edge or Chrome.'
             }
             $rows | Out-List
+        }
+
+        'managed' {
+            # 托管实例的窗口列表。空表是正常状态（还没起），不是错误。
+            $rows = @(Get-BctlManagedWindows -ProfileDir ([string]$flags['profile']))
+            Write-BctlAudit 'managed' @{ count = $rows.Count }
+            $rows | Out-List
+        }
+
+        'launch' {
+            $browser = if ($flags['browser']) { [string]$flags['browser'] } else { 'auto' }
+            $profile = if ($flags['profile']) { [string]$flags['profile'] } else { '' }
+            $recycle = [bool]$flags['recycle']
+            $existing = @(Get-BctlManagedWindows -ProfileDir $profile)
+            if ($recycle -and $existing.Count -gt 0) {
+                [void](Stop-BctlManagedBrowser -ProfileDir $profile)
+                Start-Sleep -Milliseconds 500
+                $existing = @()
+            }
+            if ($existing.Count -gt 0) {
+                $t = $existing[0]
+                Write-BctlAudit 'launch' @{ reused = $true; pid = $t.pid }
+                Out-Result ([pscustomobject]@{
+                        ok         = $true
+                        created    = $false
+                        pid        = $t.pid
+                        handle     = $t.handle
+                        title      = $t.title
+                        profileDir = (Get-BctlManagedProfileDir -Override $profile)
+                    })
+                break
+            }
+            $r = Start-BctlManagedBrowser -Browser $browser -ProfileDir $profile
+            Write-BctlAudit 'launch' @{ ok = $r.ok; pid = $r.pid; created = $r.created }
+            Out-Result $r
+        }
+
+        'close-managed' {
+            $profile = if ($flags['profile']) { [string]$flags['profile'] } else { '' }
+            $r = Stop-BctlManagedBrowser -ProfileDir $profile
+            Write-BctlAudit 'close-managed' @{ stopped = $r.stopped }
+            Out-Result $r
         }
 
         'windows' {

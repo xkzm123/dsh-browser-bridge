@@ -51,10 +51,28 @@ description: 操控用户已经打开、正在运行的 Edge/Chrome/Firefox（�
 - `browser_batch` —— 多步合成一次往返（清空 → 输入 → 回车）
 - `browser_click_text` —— 点完直接回传 `after` 状态（class / aria-pressed），大多数「点成功了吗」当场答完
 
+## 目标模式（先看这一节，它决定「哪个窗口」）
+
+部署会配成三种模式之一，`browser_windows` 输出的第一行直接写着现在是哪一种：
+
+| targetMode | 默认 | 工具会碰的窗口 | 会不会启动浏览器 |
+|---|---|---|---|
+| `existing` | ✅ | 只有用户自己打开的那些 | 从不 |
+| `new` | | 只有插件自己起的那个隔离实例（独立 `--user-data-dir`） | 没有就启动；启动失败就报错，绝不退回用户窗口 |
+| `auto` | | 优先托管实例，其次用户窗口 | 先尝试启动，起不来才退回 |
+
+设置入口：**设置 → 插件 → dsh-browser-bridge → 配置 → 目标浏览器**。等价做法是改 profile 的 `cordis.patch.yml` 里那一行的 `targetMode`（`existing` / `new` / `auto`），保存即热重载。
+
+- `existing` 下「浏览器不见了」= 关掉最后一个窗口后进程常驻：让用户从任务栏恢复，或 `bctl.ps1 wake`。**绝对不要执行 `msedge.exe` / `chrome.exe`**——那会多开一个窗口和一个标签，破坏用户现场。
+- `new` / `auto` 下启动托管实例是**工具自己的事**（`bctl.ps1 launch`）。不要手工去起浏览器，报错里带的原因原样转述给用户。
+- `new` 下显式传一个用户窗口的 pid 会被拒绝：这是策略，不是 bug。不要绕，告诉用户去改开关。
+- 托管实例是全新 profile：没有登录态、没有扩展。要用 JS 桥，得在那个窗口里单独装一次 userscript（`bridge install`）。
+- 切换模式会重挂插件，正在跑的浏览器调用会断，长任务中途别切。
+
 ## 铁律（每条都是踩过的坑）
 
-0. **不要启动、关闭或重启浏览器。** 工具层已经硬拒绝 `CTRL+W/F4` 和窗口按钮，不要试图绕过（`allowClose` / `--force`）。
-0.5 **只点网页内容，不点浏览器自己的按钮。** 所有按名字查找都限定在 `Document` 子树里；如果报「matched a browser window control」，说明页面里真的没有这个元素，换个名字或先 `snapshot` 看看。 工具只操作已经存在的窗口。浏览器"不见了"通常是关掉最后一个窗口后进程常驻（任务栏无图标），用 `browser_windows` 看 `(no window — will be restored)` 标记，或直接调工具让它自己 `wake`。**执行 `msedge.exe` / `chrome.exe` 是最严重的错误**——它会多开一个窗口和一个标签，破坏用户现场。
+0. **除 `new`/`auto` 的托管实例外，不要启动、关闭或重启浏览器。** 工具层已经硬拒绝 `CTRL+W/F4` 和窗口按钮，不要试图绕过（`allowClose` / `--force`）。
+0.5 **只点网页内容，不点浏览器自己的按钮。** 所有按名字查找都限定在 `Document` 子树里；如果报「matched a browser window control」，说明页面里真的没有这个元素，换个名字或先 `snapshot` 看看。 工具只操作已经存在的窗口。浏览器"不见了"通常是关掉最后一个窗口后进程常驻（任务栏无图标），用 `browser_windows` 看 `(no window — will be restored)` 标记，或直接调工具让它自己 `wake`。
 1. **点击前先拿到坐标。** 坐标来自 `browser_snapshot` 的 `cx,cy`（物理像素，虚拟屏幕可能是负原点），不要凭空算。
 2. **搜索/列表页要按标题选，不要按位置猜。** 先 `browser_page_query` 的 `items` op 拿到「标题 + 链接」列表，逐条读标题再决定点哪个。标题和目标不符就换关键词或翻页——不要挑一个看起来像的就点。
 3. **不要在用户正在输入的输入框里注入文字。** `type` 与 `key` 现在必须带 `--pid`，发键前会校验前台窗口确实是目标浏览器；校验失败一个字符都不发。如果报「refused to send」，先把浏览器切到前台，不要重试。 先用 `uia --type Edit` 看有没有占位符/草稿；`type` 会插在光标处而不是覆盖。真要写先 `key CTRL+A` 再写。
@@ -90,6 +108,10 @@ bctl.ps1 js "document.title + ' | ' + location.href"
 
 ```powershell
 bctl.ps1 doctor
+bctl.ps1 browsers [--managed-only]        # managed=true 就是插件自己起的那个实例
+bctl.ps1 managed                          # 只列托管实例（空表 = 还没起）
+bctl.ps1 launch [--browser msedge|chrome|auto] [--profile <dir>] [--recycle]
+bctl.ps1 close-managed                    # 只关托管实例，绝不碰用户的窗口
 bctl.ps1 windows
 bctl.ps1 title|url|tabs|tab|newtab|closetab <pid> ...
 bctl.ps1 uia <pid> [--type Button] [--pattern "正则"] [--limit N]
