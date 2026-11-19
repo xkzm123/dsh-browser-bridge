@@ -3,10 +3,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/xkzm123/dsh-browser-bridge/releases"><img alt="version" src="https://img.shields.io/badge/version-1.3.0-2f81f7"></a>
+  <a href="https://github.com/xkzm123/dsh-browser-bridge/releases"><img alt="version" src="https://img.shields.io/badge/version-1.6.2-2f81f7"></a>
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-2ea043"></a>
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-8957e5">
-  <img alt="tools" src="https://img.shields.io/badge/tools-20-d29922">
+  <img alt="tools" src="https://img.shields.io/badge/tools-22-d29922">
   <img alt="deps" src="https://img.shields.io/badge/dependencies-0-2ea043">
 </p>
 
@@ -70,7 +70,7 @@ dsh plugin --profile web add github:xkzm123/dsh-browser-bridge
 装完会显示类似这样：
 
 ```
-+ dsh-browser-bridge 1.3.0
++ dsh-browser-bridge 1.6.2
 Done in 5.1s
 ```
 
@@ -163,7 +163,7 @@ https://raw.githubusercontent.com/xkzm123/dsh-browser-bridge/main/bridge/bridge.
 
 | 位置 | 内容 | 含义 |
 |---|---|---|
-| 左上 | `dsh-browser-bridge v1.3.0` | 脚本名和版本 |
+| 左上 | `dsh-browser-bridge v1.5.1` | 脚本名和版本 |
 | 作者 | `xkzm123` | 谁写的 |
 | 源 | `githubusercontent.com/.../bridge.user.js` | 从仓库取的，源码可查 |
 | 包含 URL | `*://*/*` | 在所有网页上生效——它需要能在任何页面里干活 |
